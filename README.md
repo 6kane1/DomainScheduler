@@ -104,7 +104,7 @@ Settings that apply to every CPU:
 
 ## Project status
 
-Version 1.3.0. The engine, masks, Auto, presets and the roadmap features are covered by 90
+Version 1.4.0. The engine, masks, Auto, presets and the roadmap features are covered by 90
 automated tests that run against a simulated Windows. Hardware coverage is narrow: please report
 your CPU, Windows build and before/after numbers in the issues.
 
