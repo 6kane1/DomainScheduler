@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>DomainScheduler</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DomainScheduler.Tests" />
+    <InternalsVisibleTo Include="DomainScheduler" />
+    <EmbeddedResource Include="Lang\*.json" Exclude="Lang\tables.json" />
+    <EmbeddedResource Include="Lang\tables.json" LogicalName="tables.json" />
+    <EmbeddedResource Include="Lang\threads.ini" LogicalName="threads.ini" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="4.0.0" />
+  </ItemGroup>
+</Project>

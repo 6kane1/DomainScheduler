@@ -1,0 +1,22 @@
+{
+  "knownGames": [
+    { "exe": "cs2.exe", "label": "Counter-Strike 2" },
+    { "exe": "dota2.exe", "label": "Dota 2" },
+    { "exe": "csgo.exe", "label": "Counter-Strike: Global Offensive" },
+    { "exe": "hl2.exe", "label": "Source engine game" },
+    { "exe": "Cyberpunk2077.exe", "label": "Cyberpunk 2077" },
+    { "exe": "witcher3.exe", "label": "The Witcher 3" },
+    { "exe": "RDR2.exe", "label": "Red Dead Redemption 2" },
+    { "exe": "bg3.exe", "label": "Baldur's Gate 3" },
+    { "exe": "bg3_dx11.exe", "label": "Baldur's Gate 3 (DX11)" },
+    { "exe": "Warframe.x64.exe", "label": "Warframe" },
+    { "exe": "RocketLeague.exe", "label": "Rocket League" },
+    { "exe": "javaw.exe", "label": "Minecraft (Java)" }
+  ],
+  "x3d": [
+    { "sku": "7900X3D", "cores": 12 },
+    { "sku": "9900X3D", "cores": 12 },
+    { "sku": "7950X3D", "cores": 16 },
+    { "sku": "9950X3D", "cores": 16 }
+  ]
+}
