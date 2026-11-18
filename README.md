@@ -104,8 +104,9 @@ Settings that apply to every CPU:
 
 ## Project status
 
-Version 1.3.0. The engine, masks, Auto, presets and the roadmap features are covered by 90
-automated tests that run against a simulated Windows. Hardware coverage is narrow: please report
+Released version: **1.14.1** (shipped with playbook 2.1.1, in [Releases](https://github.com/6kane1/DomainOS/releases)). This source is
+the development state, **1.15.0 in testing** (signed self-update, tester channel). 177 automated tests run against a
+simulated Windows (`dotnet test tests/DomainScheduler.Tests`). Hardware coverage is narrow: please report
 your CPU, Windows build and before/after numbers in the issues.
 
 ## Build from source
