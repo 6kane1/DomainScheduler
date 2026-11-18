@@ -198,7 +198,7 @@ internal sealed class UpdateCard
 		}
 		if (s == null) return;
 		if (s.Busy != null) _body.Children.Add(Ui.Text(s.Busy, Ui.FsNote, "Accent", wrap: true));
-		if (s.Error != null) _body.Children.Add(Ui.Text(s.Error, Ui.FsNote, "Warn", wrap: true));
+		if (s.Error != null) _body.Children.Add(Ui.Text(L.T(s.Error), Ui.FsNote, "Warn", wrap: true));
 		if (_always)
 		{
 			string when = s.Checking ? L.T("Checking…")

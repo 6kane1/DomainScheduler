@@ -8,9 +8,7 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
     <InvariantGlobalization>false</InvariantGlobalization>
-    <Version>1.15.0-test1.0</Version>
-    <!-- The update channel built into this build: "stable" (from #downloads / the site) or "test" (from #test-builds). -->
-    <UpdateChannel>test</UpdateChannel>
+    <Version>1.15.0-test1.2</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Company>DomainScheduler</Company>
     <Product>DomainScheduler</Product>

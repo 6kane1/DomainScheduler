@@ -99,6 +99,7 @@ internal sealed class SettingsPage : Page
 		};
 		CheckRow upd = Toggle("CheckUpdates", L.T("Check for updates"), L.T("Once a day Toolbox reads a small file from the Domain OS site (nothing about this PC is sent). A new version is shown on the home page; nothing installs until you press Update."), null, fallback: true);
 		stackPanel.Children.Add(Ui.Card(Ui.Col(Ui.Head(L.T("General")), checkRow, auto, charts, upd, Ui.Row(Ui.Text(L.T("Re-apply presets every") + "  "), comboBox), Ui.Row(Ui.Text(L.T("Language") + "  "), comboBox2))));
+		stackPanel.Children.Add(Ui.Card(TesterCard()));
 		stackPanel.Children.Add(Ui.Card(Functions()));
 		stackPanel.Children.Add(Ui.Card(FlagCard()));
 		StackPanel stackPanel2 = Ui.Col(Ui.Head(L.T("Watchlist")), Ui.Note(L.T("Only these programs are changed (plus the built-in presets and Auto's background). Add programs on the Processes page.")));
@@ -196,6 +197,68 @@ internal sealed class SettingsPage : Page
 		stackPanel.Children.Add(Toggle("LiveIrq", L.T("Watch driver latency while a game runs (live DPC/ISR)"), L.T("On by default. While a game is handled, Windows' kernel trace measures how long every driver's DPCs and interrupts take. Drivers that took 1 ms or longer are written to the activity log once a minute. Nothing is changed; the trace stops when the game ends."), null, fallback: true));
 		stackPanel.Children.Add(Toggle("LiveIrqMask", L.T("Keep the game off cores busy with interrupts"), L.T("On by default, needs the line above. A core that spends more than 4% of its time on interrupts (for 20 s in a row) is left out of the game's cores, both of its threads; it comes back when it stays under 2%. Before the first measurement the pinned devices from the registry are used, as before."), null, fallback: true));
 		return stackPanel;
+	}
+
+	/// <summary>
+	/// Tester key (1.15.0 Test 1.1): the key from the closed testers channel turns the test channel on. It is checked
+	/// against the published test builds before it is saved; "Remove" goes back to the stable channel.
+	/// </summary>
+	private UIElement TesterCard()
+	{
+		StackPanel col = Ui.Col(Ui.Head(L.T("Tester")), Ui.Note(L.T("Testers get a key in the closed Discord channel. With the key Toolbox also receives the test builds; without it, only stable releases.")));
+		TextBlock state = Ui.Text("", Ui.FsNote, "Dim", bold: false, wrap: true);
+		string typed = "";
+		void Show()
+		{
+			bool on = TesterKey.Current() != null;
+			state.Text = on ? L.T("Test channel on: this PC receives the test builds.") : L.T("No key: stable channel.");
+			state.Foreground = Ui.B(on ? "Accent" : "Dim");
+		}
+		TextBox box = Ui.Input("", 360.0, delegate(string v) { typed = v; });
+		Button save = null;
+		save = Ui.Btn(L.T("Save key"), delegate
+		{
+			byte[] key = TesterKey.Parse(typed);
+			if (key == null)
+			{
+				state.Text = L.T("This is not a tester key. Copy it whole, starting with DOST-.");
+				state.Foreground = Ui.B("Warn");
+				return;
+			}
+			save.IsEnabled = false;
+			state.Text = L.T("Checking the key…");
+			state.Foreground = Ui.B("Dim");
+			Task.Run(async delegate
+			{
+				string err = await Updater.TryKeyAsync(key);
+				S.Dispatcher.BeginInvoke((Action)delegate
+				{
+					save.IsEnabled = true;
+					if (err != null)
+					{
+						state.Text = L.T(err);
+						state.Foreground = Ui.B("Warn");
+						return;
+					}
+					Settings.Set("TesterKey", TesterKey.Format(key));
+					box.Text = "";
+					S.Did(L.T("Tester key saved: test channel on"));
+					Show();
+					UpdateService.Instance?.CheckNow();
+				});
+			});
+		});
+		Button remove = Ui.Btn(L.T("Remove key"), delegate
+		{
+			Settings.Reset("TesterKey");
+			S.Did(L.T("Tester key removed: stable channel"));
+			Show();
+			UpdateService.Instance?.CheckNow();
+		});
+		Show();
+		col.Children.Add(Ui.Row(box, save, remove));
+		col.Children.Add(state);
+		return col;
 	}
 
 	private UIElement FlagCard()

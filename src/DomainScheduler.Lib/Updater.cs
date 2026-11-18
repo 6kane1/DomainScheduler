@@ -6,23 +6,23 @@ using System.Text.Json;
 namespace DomainScheduler;
 
 /// <summary>
-/// The version of this build and the update channel built into it (1.15.0). A stable build follows only the stable
-/// releases; a test build ("1.15.0-test1.0") follows the test builds and the stable releases, whichever is newer.
-/// The channel comes from the build itself (the csproj property UpdateChannel), not from a setting or a login.
+/// The version of this build and the update channel (1.15.0). Stable: only the stable releases. Test: the test
+/// builds and the stable releases, whichever is newer. The test channel is on while a valid tester key is saved
+/// (Settings → Tester); the test builds are encrypted with that key, so without it there is nothing to read.
 /// </summary>
 public static class AppVersion
 {
-    static string _full, _channel;
+    static string _full;
 
-    /// <summary>"1.15.0" or "1.15.0-test1.0" (the informational version without the "+commit" tail).</summary>
+    /// <summary>"1.15.0" or "1.15.0-test1.1" (the informational version without the "+commit" tail).</summary>
     public static string Full => _full ??= Read();
 
     /// <summary>"stable" or "test".</summary>
-    public static string Channel => _channel ??= ReadChannel();
+    public static string Channel => TesterKey.Current() != null ? "test" : "stable";
 
     public static bool IsTest => Channel == "test";
 
-    /// <summary>What the window shows: "1.15.0" or "1.15.0 Test 1.0".</summary>
+    /// <summary>What the window shows: "1.15.0" or "1.15.0 Test 1.1".</summary>
     public static string Display => Describe(Full);
 
     public static string Describe(string v)
@@ -41,16 +41,72 @@ public static class AppVersion
         return plus >= 0 ? v[..plus] : v;
     }
 
-    static string ReadChannel()
+    /// <summary>For tests.</summary>
+    public static void Override(string full) { _full = full; }
+}
+
+/// <summary>
+/// The tester key (1.15.0 Test 1.1): 32 random bytes shown as "DOST-XXXX-XXXX-…" (base32). Test builds and the test
+/// feed are sealed with AES-256-GCM under it; the key is handed out only in the closed testers channel. A wrong or
+/// replaced key opens nothing (GCM refuses it), so there is no way to read a test build without the current key.
+/// </summary>
+public static class TesterKey
+{
+    const string Abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    static readonly byte[] Magic = "DOSE1"u8.ToArray();
+
+    /// <summary>The saved key (Settings "TesterKey"), null when none or unreadable.</summary>
+    public static byte[] Current() => Parse(Settings.Get("TesterKey"));
+
+    public static byte[] Parse(string text)
     {
-        var a = Assembly.GetEntryAssembly() ?? typeof(AppVersion).Assembly;
-        string c = a.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(m => m.Key == "UpdateChannel")?.Value;
-        if (string.IsNullOrWhiteSpace(c)) c = Full.Contains("-test", StringComparison.OrdinalIgnoreCase) ? "test" : "stable";
-        return c.Trim().ToLowerInvariant() == "test" ? "test" : "stable";
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        string t = text.Trim().ToUpperInvariant();
+        if (t.StartsWith("DOST")) t = t[4..];
+        t = new string(t.Where(c => c != '-' && c != ' ').ToArray());
+        int bits = 0, acc = 0; var outp = new List<byte>();
+        foreach (char c in t)
+        {
+            int v = Abc.IndexOf(c);
+            if (v < 0) return null;
+            acc = (acc << 5) | v; bits += 5;
+            if (bits >= 8) { outp.Add((byte)(acc >> (bits - 8))); bits -= 8; acc &= (1 << bits) - 1; }
+        }
+        return outp.Count == 32 ? outp.ToArray() : null;
     }
 
-    /// <summary>For tests.</summary>
-    public static void Override(string full, string channel) { _full = full; _channel = channel; }
+    public static string Format(byte[] key)
+    {
+        var sb = new System.Text.StringBuilder(); int bits = 0, acc = 0;
+        foreach (byte b in key)
+        {
+            acc = (acc << 8) | b; bits += 8;
+            while (bits >= 5) { sb.Append(Abc[(acc >> (bits - 5)) & 31]); bits -= 5; }
+            acc &= (1 << bits) - 1;
+        }
+        if (bits > 0) sb.Append(Abc[(acc << (5 - bits)) & 31]);
+        string raw = sb.ToString();
+        return "DOST-" + string.Join("-", Enumerable.Range(0, (raw.Length + 3) / 4).Select(i => raw.Substring(i * 4, Math.Min(4, raw.Length - i * 4))));
+    }
+
+    /// <summary>"DOSE1" | nonce 12 | tag 16 | ciphertext. Throws CryptographicException for a wrong key or a changed file.</summary>
+    public static byte[] Open(byte[] sealedData, byte[] key)
+    {
+        if (sealedData.Length < 33 || !sealedData.AsSpan(0, 5).SequenceEqual(Magic)) throw new InvalidDataException("Not a sealed Domain OS file.");
+        var nonce = sealedData.AsSpan(5, 12); var tag = sealedData.AsSpan(17, 16); var ct = sealedData.AsSpan(33);
+        var plain = new byte[ct.Length];
+        using var gcm = new AesGcm(key, 16);
+        gcm.Decrypt(nonce, ct, tag, plain);
+        return plain;
+    }
+
+    public static byte[] Seal(byte[] plain, byte[] key)
+    {
+        var nonce = RandomNumberGenerator.GetBytes(12); var tag = new byte[16]; var ct = new byte[plain.Length];
+        using var gcm = new AesGcm(key, 16);
+        gcm.Encrypt(nonce, plain, ct, tag);
+        return Magic.Concat(nonce).Concat(tag).Concat(ct).ToArray();
+    }
 }
 
 /// <summary>"1.15.0", "1.15.0-test1.0", "1.15.0-test1.1": a stable release is newer than every test build of the same number.</summary>
@@ -104,8 +160,8 @@ public static class UpdateVersion
     }
 }
 
-/// <summary>One file in an update feed: Toolbox or the playbook.</summary>
-public sealed record UpdateFile(string Version, string Url, string Sha256, long Size, string NotesEn, string NotesRu);
+/// <summary>One file in an update feed: Toolbox or the playbook. Sealed: the file is encrypted with the tester key (Sha256/Size are of the encrypted file).</summary>
+public sealed record UpdateFile(string Version, string Url, string Sha256, long Size, string NotesEn, string NotesRu, bool Sealed = false);
 
 /// <summary>update/stable.json or update/test.json on the site.</summary>
 public sealed record UpdateFeed(UpdateFile Toolbox, UpdateFile Playbook);
@@ -176,7 +232,8 @@ public static class Updater
             if (!root.TryGetProperty(name, out var e) || e.ValueKind != JsonValueKind.Object) return null;
             string S(string k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
             long size = e.TryGetProperty("size", out var z) && z.ValueKind == JsonValueKind.Number ? z.GetInt64() : 0;
-            var f = new UpdateFile(S("version"), S("url"), S("sha256")?.ToLowerInvariant(), size, S("notes_en") ?? "", S("notes_ru") ?? "");
+            bool sealedFile = e.TryGetProperty("sealed", out var se) && se.ValueKind == JsonValueKind.True;
+            var f = new UpdateFile(S("version"), S("url"), S("sha256")?.ToLowerInvariant(), size, S("notes_en") ?? "", S("notes_ru") ?? "", sealedFile);
             bool ok = UpdateVersion.Parse(f.Version) != null && f.Url != null && f.Url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
                       && f.Sha256 is { Length: 64 } && f.Size > 0;
             return ok ? f : null;
@@ -213,24 +270,58 @@ public static class Updater
             using var http = Client(TimeSpan.FromSeconds(20));
             async Task<UpdateFeed> Get(string name)
             {
-                string q = "?t=" + DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute;
-                byte[] body;
-                try { body = await http.GetByteArrayAsync(FeedBase + name + q, ct); }
-                catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound) { return null; }
-                string sig;
-                try { sig = await http.GetStringAsync(FeedBase + name + ".sig" + q, ct); }
-                catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound) { sig = null; }
-                if (!Verify(body, sig)) throw new InvalidDataException("The update file " + name + " has no valid Domain OS signature: it was ignored.");
-                return ParseFeed(System.Text.Encoding.UTF8.GetString(body));
+                byte[] body = await Fetch(http, name, ct);
+                return body == null ? null : ParseFeed(System.Text.Encoding.UTF8.GetString(body));
             }
             var stable = await Get("stable.json");
-            var test = AppVersion.IsTest ? await Get("test.json") : null;
+            UpdateFeed test = null;
+            byte[] key = TesterKey.Current();
+            if (key != null)
+            {
+                byte[] box = await Fetch(http, "test.bin", ct);
+                if (box != null)
+                {
+                    try { test = ParseFeed(System.Text.Encoding.UTF8.GetString(TesterKey.Open(box, key))); }
+                    catch (CryptographicException) { return new UpdateCheck(null, null, KeyRefused); }
+                }
+            }
             return Choose(AppVersion.Full, AppVersion.Channel, InstalledPlaybook(), stable, test);
         }
         catch (Exception e) when (e is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             return new UpdateCheck(null, null, e.Message);
         }
+    }
+
+    public static string KeyRefused => L.N("The tester key does not open the test builds (it may have been replaced). Take the current key from the testers channel.");
+
+    /// <summary>Checks a key against the published test feed: null when it opens it, otherwise why not.</summary>
+    public static async Task<string> TryKeyAsync(byte[] key, CancellationToken ct = default)
+    {
+        try
+        {
+            using var http = Client(TimeSpan.FromSeconds(20));
+            byte[] box = await Fetch(http, "test.bin", ct);
+            if (box == null) return L.N("There are no test builds right now.");
+            ParseFeed(System.Text.Encoding.UTF8.GetString(TesterKey.Open(box, key)));
+            return null;
+        }
+        catch (CryptographicException) { return KeyRefused; }
+        catch (Exception e) { return e.Message; }
+    }
+
+    /// <summary>A feed file and its signature; null when it is not there (404). Throws when the signature is missing or wrong.</summary>
+    static async Task<byte[]> Fetch(HttpClient http, string name, CancellationToken ct)
+    {
+        string q = "?t=" + DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute;
+        byte[] body;
+        try { body = await http.GetByteArrayAsync(FeedBase + name + q, ct); }
+        catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound) { return null; }
+        string sig;
+        try { sig = await http.GetStringAsync(FeedBase + name + ".sig" + q, ct); }
+        catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound) { sig = null; }
+        if (!Verify(body, sig)) throw new InvalidDataException("The update file " + name + " has no valid Domain OS signature: it was ignored.");
+        return body;
     }
 
     public static string Sha256(string path)
@@ -244,7 +335,7 @@ public static class Updater
     {
         Directory.CreateDirectory(Dir);
         string final = Path.Combine(Dir, fileName), part = final + ".part";
-        if (File.Exists(final) && new FileInfo(final).Length == f.Size && Sha256(final) == f.Sha256) return final;
+        if (!f.Sealed && File.Exists(final) && new FileInfo(final).Length == f.Size && Sha256(final) == f.Sha256) return final;
         using var http = Client(TimeSpan.FromMinutes(30));
         using (var resp = await http.GetAsync(f.Url, HttpCompletionOption.ResponseHeadersRead, ct))
         {
@@ -268,6 +359,16 @@ public static class Updater
             throw new InvalidDataException($"The downloaded file does not match (size {len}, SHA-256 {sum[..12]}…): it was deleted and nothing was changed.");
         }
         if (File.Exists(final)) File.Delete(final);
+        if (f.Sealed)
+        {
+            byte[] key = TesterKey.Current() ?? throw new InvalidDataException(KeyRefused);
+            byte[] plain;
+            try { plain = TesterKey.Open(File.ReadAllBytes(part), key); }
+            catch (CryptographicException) { throw new InvalidDataException(KeyRefused); }
+            finally { try { File.Delete(part); } catch (Exception) { } }
+            File.WriteAllBytes(final, plain);
+            return final;
+        }
         File.Move(part, final);
         return final;
     }

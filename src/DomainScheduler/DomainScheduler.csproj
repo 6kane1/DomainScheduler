@@ -24,7 +24,6 @@
   </ItemGroup>
   <ItemGroup>
     <Resource Include="app.ico" />
-    <AssemblyMetadata Include="UpdateChannel" Value="$(UpdateChannel)" />
     <!-- HUD fonts (1.14.0), SIL Open Font License 1.1: JetBrains Mono 2.304 and Inter 4.1; the license texts go along. -->
     <Resource Include="Fonts\*.ttf" />
     <Resource Include="Fonts\*-OFL.txt" />

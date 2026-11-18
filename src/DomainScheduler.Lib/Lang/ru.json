@@ -994,6 +994,18 @@
   "Checked {0:t}": "Проверено в {0:t}",
   "Check now": "Проверить сейчас",
   "Return to the previous version": "Вернуть прошлую версию",
-  "test channel": "тестовый канал"
+  "test channel": "тестовый канал",
+  "Tester": "Тестировщик",
+  "Testers get a key in the closed Discord channel. With the key Toolbox also receives the test builds; without it, only stable releases.": "Тестировщики получают ключ в закрытом канале Discord. С ключом Toolbox получает и тестовые сборки, без него — только стабильные релизы.",
+  "Test channel on: this PC receives the test builds.": "Тестовый канал включён: этот ПК получает тестовые сборки.",
+  "No key: stable channel.": "Ключа нет: стабильный канал.",
+  "Save key": "Сохранить ключ",
+  "This is not a tester key. Copy it whole, starting with DOST-.": "Это не ключ тестировщика. Скопируйте его целиком, начиная с DOST-.",
+  "Checking the key…": "Проверка ключа…",
+  "Tester key saved: test channel on": "Ключ тестировщика сохранён: тестовый канал включён",
+  "Remove key": "Удалить ключ",
+  "Tester key removed: stable channel": "Ключ тестировщика удалён: стабильный канал",
+  "The tester key does not open the test builds (it may have been replaced). Take the current key from the testers channel.": "Ключ тестировщика не открывает тестовые сборки (возможно, его заменили). Возьмите актуальный ключ в канале тестировщиков.",
+  "There are no test builds right now.": "Сейчас тестовых сборок нет."
  }
 }

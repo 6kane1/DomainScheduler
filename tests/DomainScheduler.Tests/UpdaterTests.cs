@@ -147,3 +147,48 @@ public class UpdateSignatureTests
         Assert.True(Updater.Verify(File.ReadAllBytes(Path.Combine(dir, "feed.json")), File.ReadAllText(Path.Combine(dir, "feed.json.sig"))));
     }
 }
+
+public class TesterKeyTests
+{
+    [Fact]
+    public void FormatAndParseRoundTrip()
+    {
+        byte[] k = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        string t = TesterKey.Format(k);
+        Assert.StartsWith("DOST-", t);
+        Assert.Equal(k, TesterKey.Parse(t));
+        Assert.Equal(k, TesterKey.Parse("  " + t.ToLowerInvariant().Replace("-", " ") + " "));
+        Assert.Null(TesterKey.Parse("DOST-AAAA"));
+        Assert.Null(TesterKey.Parse("DOST-1111-0000"));
+        Assert.Null(TesterKey.Parse(""));
+    }
+
+    [Fact]
+    public void SealOpenAndWrongKey()
+    {
+        byte[] k = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        byte[] box = TesterKey.Seal(System.Text.Encoding.UTF8.GetBytes("feed"), k);
+        Assert.Equal("feed", System.Text.Encoding.UTF8.GetString(TesterKey.Open(box, k)));
+        byte[] other = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        Assert.ThrowsAny<System.Security.Cryptography.CryptographicException>(() => TesterKey.Open(box, other));
+        box[^1] ^= 1;
+        Assert.ThrowsAny<System.Security.Cryptography.CryptographicException>(() => TesterKey.Open(box, k));
+    }
+
+    [Fact]
+    public void OpensWhatThePublishToolSealed()
+    {
+        string dir = Path.Combine(AppContext.BaseDirectory, "sigsample");
+        byte[] key = TesterKey.Parse(File.ReadAllText(Path.Combine(dir, "sealed.key")));
+        Assert.Equal(Enumerable.Range(0, 32).Select(i => (byte)i).ToArray(), key);
+        Assert.Equal("hello domain os", System.Text.Encoding.UTF8.GetString(TesterKey.Open(File.ReadAllBytes(Path.Combine(dir, "sealed.bin")), key)));
+    }
+
+    [Fact]
+    public void SealedFeedEntryIsRead()
+    {
+        string sha = new string('b', 64);
+        var f = Updater.ParseFeed("{\"toolbox\":{\"version\":\"1.15.0-test1.2\",\"sealed\":true,\"url\":\"https://a/tb.bin\",\"sha256\":\"" + sha + "\",\"size\":9}}");
+        Assert.True(f.Toolbox.Sealed);
+    }
+}
