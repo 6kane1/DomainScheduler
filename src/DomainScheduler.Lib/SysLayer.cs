@@ -16,7 +16,7 @@ public sealed class SysLayer
     readonly Dictionary<uint, ulong> _done = new();     // pid → signature of the thread set that was handled
     readonly HashSet<uint> _refused = new();            // pids that cannot be opened or are protected
     long _reverts = -1;
-    bool _enabled = true, _warmup;
+    bool _enabled = true;
     string _mask = "auto";
 
     public int LastTargets { get; private set; }
@@ -25,11 +25,10 @@ public sealed class SysLayer
     public SysLayer(Engine engine) => _e = engine;
 
     /// <summary>New presets, watchlist, mask rules or switches: everything is applied again on the next pass.</summary>
-    public void Configure(Dictionary<string, Preset> presets, IEnumerable<string> watch, Dictionary<string, string> affRules, string maskName, bool enabled, bool warmup = false)
+    public void Configure(Dictionary<string, Preset> presets, IEnumerable<string> watch, Dictionary<string, string> affRules, string maskName, bool enabled)
     {
         lock (_lock)
         {
-            _warmup = warmup;
             _presets = new Dictionary<string, Preset>(presets ?? new(), StringComparer.OrdinalIgnoreCase);
             _watch = new HashSet<string>(watch ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
             _affRules = new Dictionary<string, string>(affRules ?? new(), StringComparer.OrdinalIgnoreCase);
@@ -61,8 +60,7 @@ public sealed class SysLayer
         if (!p.Builtin && !watched) return null;          // a user preset needs the watchlist
         if (p.Builtin && !_enabled) return null;
         // Only a watched process gets a mask; system presets touch threads and boost only.
-        return new ApplyOptions { MaskName = _mask, DoMask = watched && !p.Builtin, DoAffRules = watched && !p.Builtin, DoThreads = true, Sys = p.Builtin, Game = watched && !p.Builtin,
-            Warmup = _warmup && watched && !p.Builtin };      // 22.2: the measured warm-up is for the manual apply of a watched program
+        return new ApplyOptions { MaskName = _mask, DoMask = watched && !p.Builtin, DoAffRules = watched && !p.Builtin, DoThreads = true, Sys = p.Builtin, Game = watched && !p.Builtin };
     }
 
     /// <summary>One pass; skip = the process Auto is laying out itself. Returns how many processes were applied.</summary>

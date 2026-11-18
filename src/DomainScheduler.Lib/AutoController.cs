@@ -76,6 +76,8 @@ public sealed class AutoController
     public Func<string> AutostartLine = Autostart.ReportLine;
     /// <summary>Problems SelfTest found at start (empty = OK).</summary>
     public List<string> SelfTestProblems = new();
+    /// <summary>The program's own load, measured by the application (a line of the Report).</summary>
+    public Func<string> SelfLoadLine;
     /// <summary>Test hook: lets a test alter the mask plan (e.g. make it unsatisfiable).</summary>
     internal Func<AutoLogic.MaskPlan, AutoLogic.MaskPlan> MaskFilter;
 
@@ -89,8 +91,6 @@ public sealed class AutoController
     bool _unrecognized;
     string _notWatched = "";
     // Section 22: the roadmap switches. They are handed over by the settings; Auto reads no setting itself.
-    /// <summary>22.4: pinned threads are also limited to the CPU Set of their processor.</summary>
-    public bool ThreadSets;
     /// <summary>22.5: the fine timer resolution is requested while a game is active.</summary>
     public bool TimerRes;
     /// <summary>22.6: the heat policy of the game's own preset (HotFirst, HotOthers); null = none.</summary>
@@ -138,6 +138,10 @@ public sealed class AutoController
     }
 
     public double Confidence { get { lock (_lock) return _confidence; } }
+    /// <summary>Read-only facts for the overview: the game's mask (0 = none), the p99 before the changes, when they were applied.</summary>
+    public ulong MaskNow { get { lock (_lock) return State == AutoState.Active && _mask?.Plan != null && _mask.Plan.Satisfied ? _mask.Plan.Mask : 0; } }
+    public double BaselineP99 { get { lock (_lock) return State == AutoState.Active ? _baselineP99 : 0; } }
+    public DateTime AppliedAt { get { lock (_lock) return State == AutoState.Active ? _appliedAt : default; } }
     /// <summary>Why the foreground game is not handled ("" = nothing blocks).</summary>
     public string Blocked { get { lock (_lock) return _blocked.Length > 0 ? _blocked : _notWatched.Length > 0 ? L.F("{0} is not on the watchlist", _notWatched) : ""; } }
 
@@ -164,13 +168,10 @@ public sealed class AutoController
     int _applyErrors;
     int _tick;
     DateTime _sessionStart;
-    // watchdog
+    // frame time before the changes (shown on the overview and in the report; Auto never reverts on it)
     double _baselineP99;
     int _baselineFrames;
-    DateTime _appliedAt, _lastWindowCheck;
-    int _badWindows;
-    double _onP99;            // p99 with the changes, over the bad windows
-    DateTime _verifyFrom;     // != default: the A/B check is running (changes taken off)
+    DateTime _appliedAt;
     string _lastRevertReason = "";
 
     public sealed class MaskPlan
@@ -248,7 +249,9 @@ public sealed class AutoController
                     _tick = 0;
                     Note(L.T("Armed"));
                     SetStatus(L.T("Waiting for the game…"));
-                    PassBackground();
+                    // The background pass is extra: if it fails, Auto still waits for the game.
+                    try { PassBackground(); }
+                    catch (Exception ex) { Note(L.F("Background pass failed: {0}", AppLog.Describe(ex)), AppLog.Sev.Warn); }
                 }
                 else if (State is AutoState.Armed or AutoState.Active)
                     RevertAllLocked(L.T("Button"));
@@ -320,7 +323,7 @@ public sealed class AutoController
     void FaultLocked(Exception ex)
     {
         State = AutoState.Faulted;
-        Note(L.F("Error: {0}", ex.Message), AppLog.Sev.Error);
+        Note(L.F("Error: {0}", AppLog.Describe(ex)), AppLog.Sev.Error);
         try { _e.TimerRelease(); } catch (Exception) { }
         try { _e.RevertAll(); } catch (Exception e2) { Note(L.F("Revert error: {0}", e2.Message)); }
         try
@@ -351,9 +354,6 @@ public sealed class AutoController
         _lastThreadCount = 0;
         _baselineP99 = 0;
         _baselineFrames = 0;
-        _badWindows = 0;
-        _onP99 = 0;
-        _verifyFrom = default;
     }
 
     // ---- tick ------------------------------------------------------------------------------------
@@ -426,29 +426,15 @@ public sealed class AutoController
             LeaveGame(revertGame: false);
             return;
         }
-        if (target == _game) _absentSince = default;
-        else
-        {
-            if (_absentSince == default) _absentSince = now;
-            if ((now - _absentSince).TotalMilliseconds > AutoPolicy.ExitStableMs)
-            {
-                Note(L.F("{0} not in front for {1} s: reverted", _gameExe, AutoPolicy.ExitStableMs / 1000));
-                LeaveGame(revertGame: true);
-                return;
-            }
-        }
-        if (_verifyFrom != default)
-        {
-            Verify(now);
-            return;
-        }
+        // The changes stay while the game process lives, also when it is not in front (alt-tab):
+        // they are reverted when the game ends, on the Revert button, or when Auto is switched off.
+        _absentSince = default;
         if (Top5Mode && Dynamic.Running) Dynamic.Tick(now, _e.ThreadsNow(_game));
         if (ReapplyTick)
         {
             if (!Reapply(now)) return;
             PassBackground();
         }
-        CheckFrames(now);
     }
 
     // ---- detection (12.4) ------------------------------------------------------------------------
@@ -543,7 +529,7 @@ public sealed class AutoController
         Soft?.Begin(procs, new[] { pid }, WatchList?.Invoke(), _probe.SelfPid);
         if (!Reapply(now, first: true)) return;
         PassBackground();
-        _appliedAt = _lastWindowCheck = _now();
+        _appliedAt = _now();
     }
 
     void LeaveGame(bool revertGame)
@@ -571,9 +557,13 @@ public sealed class AutoController
                 return Watchdog(L.T("The mask became unsatisfiable"));
             if (!mp.Satisfied)
                 foreach (var n in mp.Notes) Note(L.F("Mask not applied: {0}", n));
+            ulong prevMask = _mask?.Plan != null && _mask.Plan.Satisfied ? _mask.Plan.Mask : 0;
             _mask = new MaskPlan { Plan = mp };
             ulong mask = mp.Satisfied ? mp.Mask : 0;
+            // The mask moved (live interrupt cores changed): threads placed on processors that left it are re-planned.
+            bool maskMoved = !first && mask != prevMask;
 
+            if (Top5Mode && maskMoved && Dynamic.Running) Dynamic.Stop(true);   // slots move to the new mask's processors
             if (Top5Mode) return ReapplyTop5(t, mask, now, first);
 
             // Threads: warm-up on the first application, plan only when needed (17.2).
@@ -590,14 +580,14 @@ public sealed class AutoController
                 }
             }
             else snap = _e.Snapshot(_game);
-            if (!snap.Ok) return Watchdog(L.T("The game process cannot be opened"));
+            if (!snap.Ok) return GameClosing(snap) ? false : Watchdog(L.T("The game process cannot be opened"));
 
             if (!first && _lastThreadCount > 0 && snap.Rows.Count * AutoPolicy.ThreadDropFactor < _lastThreadCount)
-                return Watchdog(L.F("The game's thread count fell from {0} to {1}", _lastThreadCount, snap.Rows.Count));
+                return GameClosing(snap) ? false : Watchdog(L.F("The game's thread count fell from {0} to {1}", _lastThreadCount, snap.Rows.Count));
             _lastThreadCount = snap.Rows.Count;
 
             var nowTids = snap.Rows.Where(r => r.Rate > AutoLogic.HotThreshold(snap)).Select(r => r.Tid).ToList();
-            bool rebuild = first || _plan.Count == 0 || AutoLogic.CompositionChange(_planTids, nowTids) > AutoPolicy.PlanChangeFraction;
+            bool rebuild = first || maskMoved || _plan.Count == 0 || AutoLogic.CompositionChange(_planTids, nowTids) > AutoPolicy.PlanChangeFraction;
             if (rebuild)
             {
                 var prev = _plan.ToDictionary(c => c.Row.Tid, c => c.LP);
@@ -625,7 +615,7 @@ public sealed class AutoController
                 _confidence = conf;
             }
             var heat = Heat?.Invoke(_gameExe) ?? ("none", "none");
-            var preset = AutoLogic.BuildAutoPreset(_gameExe, _plan, _pins, ThreadSets, heat.Item1, heat.Item2);
+            var preset = AutoLogic.BuildAutoPreset(_gameExe, _plan, _pins, heat.Item1, heat.Item2);
             var o = new ApplyOptions { DoMask = mask != 0, DoThreads = true, Warmup = false, Game = true };
             var rep = _e.ApplyAuto(_game, preset, mask, o);
             if (rep.Failures.Count > 0 && rep.HandleLevel < 0) return Watchdog(L.T("The game process cannot be opened"));
@@ -662,9 +652,9 @@ public sealed class AutoController
                 _e.Sleep(AutoPolicy.WarmupMs);
             }
             snap = _e.Snapshot(_game);
-            if (!snap.Ok) return Watchdog(L.T("The game process cannot be opened"));
+            if (!snap.Ok) return GameClosing(snap) ? false : Watchdog(L.T("The game process cannot be opened"));
             if (!first && _lastThreadCount > 0 && snap.Rows.Count * AutoPolicy.ThreadDropFactor < _lastThreadCount)
-                return Watchdog(L.F("The game's thread count fell from {0} to {1}", _lastThreadCount, snap.Rows.Count));
+                return GameClosing(snap) ? false : Watchdog(L.F("The game's thread count fell from {0} to {1}", _lastThreadCount, snap.Rows.Count));
             _lastThreadCount = snap.Rows.Count;
             _top5MetaAt = now;
         }
@@ -685,6 +675,19 @@ public sealed class AutoController
         return true;
     }
 
+    /// <summary>
+    /// A game that is being closed loses its threads before the process is gone. That is a normal end
+    /// (Auto stays on and waits for the next game), not a watchdog revert that switches Auto off.
+    /// </summary>
+    bool GameClosing(ThreadSnap snap)
+    {
+        bool closing = !ProcessAlive(_game, _gameCreated) || snap.Ok && snap.Rows.Count == 0;
+        if (!closing) return false;
+        Note(L.F("{0} ended", _gameExe));
+        LeaveGame(revertGame: false);
+        return true;
+    }
+
     bool Watchdog(string why)
     {
         Note(L.F("Watchdog: {0}", why), AppLog.Sev.Warn);
@@ -700,6 +703,9 @@ public sealed class AutoController
     /// runs, the background set is lowered by the same rules as in Auto; when the switch goes off
     /// or the game ends, BgRelease puts every background baseline back.
     /// </summary>
+    /// <summary>The background layer is on because a watched program runs (Auto itself off).</summary>
+    public bool BackgroundStandalone => _bgStandalone;
+
     public int StandaloneBackground(bool on, ulong gameMask)
     {
         lock (_lock)
@@ -728,7 +734,23 @@ public sealed class AutoController
         }
     }
 
+    DateTime _bgFailLogged;
+
+    /// <summary>The background pass never stops Auto: a failure is logged (at most once a minute) and the game goes on.</summary>
     void PassBackground(HashSet<uint> games = null, ulong? maskOverride = null)
+    {
+        try { PassBackgroundCore(games, maskOverride); }
+        catch (Exception ex)
+        {
+            if ((_now() - _bgFailLogged).TotalSeconds >= 60)
+            {
+                _bgFailLogged = _now();
+                Note(L.F("Background pass failed: {0}", AppLog.Describe(ex)), AppLog.Sev.Warn);
+            }
+        }
+    }
+
+    void PassBackgroundCore(HashSet<uint> games, ulong? maskOverride)
     {
         var t = TopoBuilder.Live();
         var procs = _e.ProcessesNow();
@@ -744,6 +766,7 @@ public sealed class AutoController
         }
         var running = RunningExes(procs).ToList();
         var list = new List<uint>();
+        var timerOnly = new List<uint>();
         foreach (var (pid, p) in procs)
         {
             if (pid is 0 or 4 || pid == _game || selfTree.Contains(pid)) continue;
@@ -752,89 +775,28 @@ public sealed class AutoController
             // A game the user did not put on the watchlist is nobody's background: it is left alone.
             if (_notWatched.Length > 0 && p.Name.Equals(_notWatched, StringComparison.OrdinalIgnoreCase)) continue;
             if (pid == fg) continue;      // what the user is working with right now is not lowered
-            if (SystemDeny.Contains(p.Name) || Guard.IsAntiCheatProcess(p.Name)) continue;
+            // System processes, launchers and the shell (explorer, Start, Steam…), and audio / voice / streaming / VR
+            // (BackgroundDeny) are never lowered, never on EcoQoS and keep their timer requests.
+            if (SystemDeny.Contains(p.Name) || LauncherDeny.Contains(p.Name) || BackgroundDeny.Contains(p.Name) || Guard.IsAntiCheatProcess(p.Name)) continue;
             if (Guard.Gate(p.Name, Guard.Op.Process, false, running) != null) continue;
-            if (_probe.SessionOf(pid) != mySession) continue;
+            if (_probe.SessionOf(pid) != mySession) { timerOnly.Add(pid); continue; }
             list.Add(pid);
         }
         ulong gameMask = maskOverride ?? _mask?.Mask ?? 0;
         ulong bg = t != null ? Masks.BgMask(t, gameMask) : 0;
         if (t != null && bg == t.FullMask()) bg = 0;   // nothing to separate from
-        _e.ApplyBackground(list, bg, true);
+        _e.ApplyBackground(list, bg, true, timerOnly);
     }
 
     long CreatedOf(uint pid) => _probe.CpuTime(pid, out long c, out _) ? c : 0;
 
-    // ---- frametime watchdog (12.11, 17.4) --------------------------------------------------------
+    // ---- frame time (12.11): measured for the overview only ---------------------------------------
 
     static double P99(List<double> iv)
     {
         if (iv.Count == 0) return 0;
         var s = iv.OrderBy(x => x).ToList();
         return s[Math.Min(s.Count - 1, (int)Math.Ceiling(s.Count * 0.99) - 1)];
-    }
-
-    /// <summary>
-    /// The baseline only raises a suspicion: it was measured in another moment of the game (menu,
-    /// loading, another scene). The verdict is an A/B check right away: the changes are taken off,
-    /// the frames are measured, and only a real difference keeps the revert.
-    /// </summary>
-    void CheckFrames(DateTime now)
-    {
-        if (!_frames.Available || _baselineFrames < AutoPolicy.MinFramesForWatchdog || _probe.ForegroundPid() != _game) return;
-        DateTime from = now.AddMilliseconds(-AutoPolicy.WatchdogWindowMs);
-        if (from < _appliedAt.AddMilliseconds(AutoPolicy.WatchdogWarmupMs)) return;
-        if ((now - _lastWindowCheck).TotalMilliseconds < AutoPolicy.WatchdogWindowMs) return;
-        var iv = _frames.Intervals(from, now);
-        _lastWindowCheck = now;
-        if (iv.Count < AutoPolicy.MinFramesForWatchdog) return;
-        double p99 = P99(iv);
-        if (!(_baselineP99 > 0 && p99 > _baselineP99 * (1 + AutoPolicy.WatchdogRegression)))
-        {
-            _badWindows = 0;
-            return;
-        }
-        if (++_badWindows < AutoPolicy.WatchdogConfirmWindows) return;
-        _onP99 = P99(_frames.Intervals(now.AddMilliseconds(-AutoPolicy.WatchdogWindowMs * AutoPolicy.WatchdogConfirmWindows), now));
-        Note(L.F("Frame time p99 {0:0.00} ms against {1:0.00} ms before: checking without the changes", _onP99, _baselineP99), AppLog.Sev.Warn);
-        int n = _e.Revert(_game) + _e.RevertBackground();
-        Note(L.F("Changes taken off for the check: {0} values", n));
-        _verifyFrom = _now();
-        SetStatus(L.F("Game: {0} · checking the frame time without the changes…", _gameExe));
-    }
-
-    void Verify(DateTime now)
-    {
-        double elapsed = (now - _verifyFrom).TotalMilliseconds;
-        if (elapsed < AutoPolicy.VerifySettleMs + AutoPolicy.WatchdogWindowMs) return;
-        bool front = _probe.ForegroundPid() == _game;
-        var iv = front ? _frames.Intervals(now.AddMilliseconds(-AutoPolicy.WatchdogWindowMs), now) : new List<double>();
-        if (iv.Count < AutoPolicy.MinFramesForWatchdog)
-        {
-            if (elapsed < AutoPolicy.VerifyMaxMs) return;
-            Note(L.T("The check got too few frames: the changes are returned"));
-            Resume(now, _baselineP99);
-            return;
-        }
-        double off = P99(iv);
-        if (_onP99 > off * (1 + AutoPolicy.WatchdogRegression))
-        {
-            _verifyFrom = default;
-            Watchdog(L.F("frame time p99 {0:0.00} ms with the changes against {1:0.00} ms without", _onP99, off));
-            return;
-        }
-        Note(L.F("Without the changes p99 {0:0.00} ms, with them {1:0.00} ms: the game itself got heavier, the changes are returned", off, _onP99));
-        Resume(now, off);
-    }
-
-    void Resume(DateTime now, double baseline)
-    {
-        _verifyFrom = default;
-        _badWindows = 0;
-        _baselineP99 = baseline;
-        if (!Reapply(now)) return;
-        PassBackground();
-        _appliedAt = _lastWindowCheck = _now();
     }
 
     // ---- report (12.12, 16) ----------------------------------------------------------------------
@@ -844,7 +806,7 @@ public sealed class AutoController
         lock (_lock)
         {
             var t = TopoBuilder.Live();
-            bool measured = _frames.Available && (_game == 0 || _baselineFrames >= AutoPolicy.MinFramesForWatchdog);
+            bool measured = _frames.Available && (_game == 0 || _baselineFrames >= AutoPolicy.MinFramesForBaseline);
             var sb = new StringBuilder();
             void Line(string s) => sb.AppendLine(s);
             Line(L.T("DomainScheduler — report") + "  " + _now().ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
@@ -897,20 +859,23 @@ public sealed class AutoController
             catch (Exception ex) { auto = L.F("Autostart: unknown ({0})", ex.Message); }
             if (auto.Length > 0) Line(auto);
             Line(SelfTestProblems.Count == 0 ? L.T("SelfTest: OK") : L.F("SelfTest: {0} problems ({1})", SelfTestProblems.Count, string.Join("; ", SelfTestProblems)));
-            Line(measured ? L.T("Frametime: measured") : L.T("Frametime: not measured (the performance auto-revert is off)"));
+            Line(measured ? L.T("Frametime: measured") : L.T("Frametime: not measured"));
             Line(L.T("Manual API: present, not active in Auto"));
+            string own = null;
+            try { own = SelfLoadLine?.Invoke(); } catch (Exception) { }
+            if (!string.IsNullOrEmpty(own)) Line(own);
             Line(Top5Mode ? L.F("Thread mode: dynamic Top-5, {0} moves so far", Dynamic.Moves) : L.T("Thread mode: role plan"));
             if (Top5Mode)
                 foreach (var s in Dynamic.View())
                     Line("  " + L.F("slot {0}: {1} ({2}) on processor {3}, priority {4}, {5:0}% of the game's load", s.Index + 1, s.Name, s.Tid, s.LP, s.Prio.HasValue ? "+" + s.Prio.Value : L.T("own"), s.Share * 100));
             if (t != null && t.Split.Family == "x3d")
                 Line(L.F("Big-cache domain: {0} half of the processor numbers ({1})", t.Split.UpperHalf ? L.T("upper") : L.T("lower"), Masks.Ranges(t.Split.Game)));
-            Line(L.F("Thread CPU Sets: {0}", _e.ThreadPins.Count > 0 ? L.F("{0} threads limited to their processor", _e.ThreadPins.Count) : ThreadSets ? L.T("on, none now") : L.T("off")));
+            if (_e.ThreadPins.Count > 0) Line(L.F("Thread CPU Sets: {0}", L.F("{0} threads limited to their processor", _e.ThreadPins.Count)));
             Line(L.F("Timer resolution: {0}", _e.TimerRequested ? L.T("requested (released on revert)") : TimerRes ? L.T("on, not requested now") : L.T("off")));
             Line(L.F("Soft close: {0}", Soft != null && Soft.On ? L.F("on, {0} programs asked to close; closing cannot be undone and is not part of the crash recovery", Soft.Asked) : L.T("off")));
             Line(L.T("IRQ devices: not changed"));
             Line(measured ? (_game != 0 && _baselineP99 > 0 ? L.F("Frame time: measured ({0}); baseline p99 {1:0.00} ms", _frames.Name, _baselineP99) : L.F("Frame time: measured ({0})", _frames.Name))
-                : L.F("Frame time is not measured — the performance auto-revert is off{0}", _frames.Error.Length > 0 ? " (" + _frames.Error + ")" : _frames.Available ? " (" + L.T("the game sends no DXGI Present") + ")" : ""));
+                : L.F("Frame time is not measured{0}", _frames.Error.Length > 0 ? " (" + _frames.Error + ")" : _frames.Available ? " (" + L.T("the game sends no DXGI Present") + ")" : ""));
             Line(L.F("Baseline: {0}", _e.Export().Procs.Count > 0 ? L.F("saved for {0} processes", _e.Export().Procs.Count) : L.T("nothing changed")));
             if (_lastRevertReason.Length > 0) Line(L.F("Last revert: {0}", _lastRevertReason));
             Line("");

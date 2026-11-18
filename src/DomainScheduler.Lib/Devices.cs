@@ -48,7 +48,7 @@ public static class Devices
 
     // ---- SetupAPI / CfgMgr32 -------------------------------------------------------------------
     const uint DIGCF_PRESENT = 0x2, DIGCF_ALLCLASSES = 0x4;
-    const uint SPDRP_DEVICEDESC = 0x0, SPDRP_SERVICE = 0x4, SPDRP_DRIVER = 0x9, SPDRP_FRIENDLYNAME = 0xC,
+    const uint SPDRP_DEVICEDESC = 0x0, SPDRP_SERVICE = 0x4, SPDRP_CLASS = 0x7, SPDRP_DRIVER = 0x9, SPDRP_FRIENDLYNAME = 0xC,
                SPDRP_LOCATION_INFORMATION = 0xD, SPDRP_PHYSICAL_DEVICE_OBJECT_NAME = 0xE;
     const uint DIF_PROPERTYCHANGE = 0x12, DICS_PROPCHANGE = 3, DICS_FLAG_CONFIGSPECIFIC = 2;
     const uint ALLOC_LOG_CONF = 2, ResType_IRQ = 4, CR_SUCCESS = 0;
@@ -124,6 +124,7 @@ public static class Devices
                     Name = name, Pdo = id.ToString(), Service = Prop(set, ref d, SPDRP_SERVICE),
                     DriverKey = Prop(set, ref d, SPDRP_DRIVER), DevInst = d.DevInst,
                     Location = Prop(set, ref d, SPDRP_LOCATION_INFORMATION),
+                    Class = Prop(set, ref d, SPDRP_CLASS),
                 });
                 d.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
             }
@@ -308,14 +309,21 @@ public static class Devices
     /// </summary>
     public static int WriteCalls;
 
-    public static string Write(PciDevice dev, IrqConfig want)
+    public static string Write(PciDevice dev, IrqConfig want) => Write(dev, want, true);
+
+    /// <summary>restart = false: only the registry is written (and read back); the policy starts at the next start of Windows.</summary>
+    public static string Write(PciDevice dev, IrqConfig want, bool restart)
     {
         Interlocked.Increment(ref WriteCalls);
         if (Flags.Refuse(Flags.DevicesWrite, L.T("Device policy write"))) return L.T("The feature flag devices-write is closed");
         if (dev == null || string.IsNullOrEmpty(dev.Pdo)) return L.T("No device");
+        if (IsStorage(dev)) return L.T("Storage controllers are never changed: a wrong value there can stop Windows from starting");
         string polPath = EnumRoot + dev.Pdo + PolicySub, msiPath = EnumRoot + dev.Pdo + MsiSub;
         try
         {
+            // The boot guard's marker first: Windows that does not start fine afterwards gets the backup back.
+            try { BootGuard.MarkPending(); }
+            catch (Exception e) { return L.F("Nothing was written: the safety marker could not be saved ({0})", e.Message); }
             // Backup of the original values (kept from the first change).
             var bk = File.Exists(BackupPath) ? JsonSerializer.Deserialize<Backup>(File.ReadAllText(BackupPath)) ?? new Backup() : new Backup();
             if (!bk.Devices.ContainsKey(dev.Pdo))
@@ -354,16 +362,16 @@ public static class Devices
                 if (want.MsgLimit > 0) mk.SetValue("MessageNumberLimit", want.MsgLimit, RegistryValueKind.DWord);
                 else mk.DeleteValue("MessageNumberLimit", false);
             }
-            string restart = Restart(dev);
+            string restarted = restart ? Restart(dev) : null;
             var got = ReadIrq(dev.Pdo);
             bool same = (got.Assign ?? 0) == (want.Assign ?? 0) && got.Priority == want.Priority && got.Msi == want.Msi && got.MsgLimit == want.MsgLimit;
             if (!same)
             {
                 RestoreValues(dev.Pdo, bk.Devices[dev.Pdo]);
-                Restart(dev);
+                if (restart) Restart(dev);
                 return L.T("The values did not stick: the backup was put back");
             }
-            return restart;
+            return restarted;
         }
         catch (UnauthorizedAccessException) { return L.T("Access denied: run as administrator"); }
         catch (Exception e) { return e.Message; }
@@ -379,10 +387,14 @@ public static class Devices
                 SetOrDelete(mk, n, vals.GetValueOrDefault(n, ""));
     }
 
-    /// <summary>Puts every backed-up device back and removes the backup.</summary>
+    /// <summary>A storage controller or disk (never written; see <see cref="IrqAuto.IsStorage"/>).</summary>
+    public static bool IsStorage(PciDevice dev) => dev != null && IrqAuto.IsStorage(dev.Class, dev.Name, dev.Service);
+
+    /// <summary>Puts every backed-up device back and removes the backup (and the boot guard's marker).</summary>
     public static string RevertAll()
     {
-        if (!File.Exists(BackupPath)) return null;
+        try { IrqAuto.RevertExtras(); } catch (Exception) { }
+        if (!File.Exists(BackupPath)) { BootGuard.Clear(); return null; }
         try
         {
             var bk = JsonSerializer.Deserialize<Backup>(File.ReadAllText(BackupPath)) ?? new Backup();
@@ -393,6 +405,7 @@ public static class Devices
                 if (devs.TryGetValue(pdo, out var d)) Restart(d);
             }
             File.Delete(BackupPath);
+            BootGuard.Clear();
             return null;
         }
         catch (Exception e) { return e.Message; }

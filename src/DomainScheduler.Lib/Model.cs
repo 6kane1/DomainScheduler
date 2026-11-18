@@ -207,7 +207,7 @@ public sealed class IrqConfig
 
 public sealed class PciDevice
 {
-    public string Name = "", Pdo = "", Service = "", DriverKey = "";
+    public string Name = "", Pdo = "", Service = "", DriverKey = "", Class = "";   // Class: Display, USB, Net, …
     public uint DevInst;
     public string Location = "";
 }

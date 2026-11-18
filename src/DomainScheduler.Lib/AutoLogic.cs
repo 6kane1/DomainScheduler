@@ -8,21 +8,14 @@ internal static class AutoPolicy
     public const int EnterStableMs = 5000, ExitStableMs = 15000, ReapplyMs = 5000;
     public const int MinGameLp = 4, OsReservedCores = 1;
     public const double MinMaskFraction = 0.5, HotRateFraction = 0.05, CoverTarget = 0.80;
-    public const double ConfidenceFloor = 0.60, WatchdogRegression = 0.15;
-    public const int WatchdogWindowMs = 10000;
-    /// <summary>Frames right after an application are not judged: threads migrate and caches refill.</summary>
-    public const int WatchdogWarmupMs = 10000;
-    /// <summary>Consecutive bad windows before the A/B check: one heavy moment is not a verdict.</summary>
-    public const int WatchdogConfirmWindows = 3;
-    /// <summary>The A/B check: frames without the changes are measured after this settle time.</summary>
-    public const int VerifySettleMs = 2000, VerifyMaxMs = 30000;
+    public const double ConfidenceFloor = 0.60;
     public const string GameClass = "above", BgClass = "below";
     public const int ArmingTimeoutMs = 8000, BaselineMs = 5000, WarmupMs = 700, WarmupRounds = 3;
     public const string IrqMode = GameMask.CoreMode;
     public const double GameCpuShare = 0.15;          // of one core
     public const double PlanChangeFraction = 0.25;    // thread composition change that rebuilds the plan
     public const double DeniedShareLimit = 0.30;
-    public const int ThreadDropFactor = 3, MaxApplyErrors = 3, MinFramesForWatchdog = 200;
+    public const int ThreadDropFactor = 3, MaxApplyErrors = 3, MinFramesForBaseline = 200;
 }
 
 public enum ThreadRole { Main, Render, Audio, Worker, Aux, Skip }
@@ -85,7 +78,8 @@ public static class AutoLogic
             mp.Notes.AddRange(mp.Resolved.Notes.Select(Masks.NoteText));
             return mp;
         }
-        mp.Irq = GameMask.ForRule(t, mp.Resolved.Mask, AutoPolicy.IrqMode);
+        ulong? busy = GameMask.BusyHook?.Invoke(t);
+        mp.Irq = busy.HasValue ? GameMask.ForLive(t, mp.Resolved.Mask, busy.Value) : GameMask.ForRule(t, mp.Resolved.Mask, AutoPolicy.IrqMode);
         ulong m = Reservation.Unmix(mp.Irq.Final, reserved, false);
         mp.Mask = Harden(t, m);
         if (mp.Irq.IrqIgnored) mp.Notes.Add(L.T("IRQ exclusion ignored: it would cut more than half of the mask"));
@@ -194,10 +188,9 @@ public static class AutoLogic
     };
 
     /// <summary>The synthesized preset (17.2): numeric ideal processors, Match = tid.</summary>
-    /// <param name="threadSets">22.4: pinned threads also get the CPU Set of their processor.</param>
     /// <param name="hotFirst">22.6: policy of the first slot of the plan ("pin" | "ideal" | "none").</param>
     /// <param name="hotOthers">22.6: policy of the other slots. "none" keeps the plan as it is.</param>
-    public static Preset BuildAutoPreset(string exe, IReadOnlyList<Classified> plan, bool pins, bool threadSets = false, string hotFirst = "none", string hotOthers = "none")
+    public static Preset BuildAutoPreset(string exe, IReadOnlyList<Classified> plan, bool pins, string hotFirst = "none", string hotOthers = "none")
     {
         var p = new Preset { Exe = exe, Class = AutoPolicy.GameClass, Io = "normal", Mem = "normal", Eco = "off", Boost = "" };
         for (int i = 0; i < plan.Count; i++)
@@ -205,7 +198,7 @@ public static class AutoLogic
             var c = plan[i];
             // The roles give the order; a set heat field overrides what the slot gets.
             string heat = i == 0 ? hotFirst : hotOthers;
-            bool hard = heat == "pin" || heat != "ideal" && threadSets;
+            bool hard = heat == "pin";
             p.Threads.Add(new ThreadRule
             {
                 Match = "tid",

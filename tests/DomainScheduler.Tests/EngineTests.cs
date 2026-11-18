@@ -146,7 +146,7 @@ public class EngineTests : IDisposable
     public void BackgroundOnlyLowersAndReverts()
     {
         var (e, f, _) = Make();
-        f.Procs[800] = new FakeNative.P { Name = "Discord.exe", Created = 5 };
+        f.Procs[800] = new FakeNative.P { Name = "notepad.exe", Created = 5 };
         f.Procs[801] = new FakeNative.P { Name = "idle.exe", Created = 6, Cls = 64, Io = 0, Mem = 1, EcoCtl = 1, EcoState = 1 };
         f.Procs[802] = new FakeNative.P { Name = "FACEITService.exe", Created = 7 };
         int saved = 0;
@@ -155,9 +155,9 @@ public class EngineTests : IDisposable
         Assert.True(saved > 0);
         var d = f.Procs[800];
         Assert.Equal(16384u, d.Cls);
-        Assert.Equal(0u, d.Io);
+        Assert.Equal(1u, d.Io);                // I/O low, never "very low"
         Assert.Equal(2u, d.Mem);
-        Assert.Equal(1u, d.EcoState);
+        Assert.Equal(5u, d.EcoState);          // EcoQoS + timer requests ignored
         Assert.Equal(0x3UL, d.Aff);
         Assert.Equal(64u, f.Procs[801].Cls);   // never raised
         Assert.Equal(0x3UL, f.Procs[801].Aff);
@@ -168,6 +168,57 @@ public class EngineTests : IDisposable
         Assert.Equal(2u, d.Io);
         Assert.Equal(5u, d.Mem);
         Assert.Equal(ulong.MaxValue, d.Aff);
+    }
+
+    [Fact]
+    public void TimerGuardIgnoresTimerRequestsAndReverts()
+    {
+        var (e, f, _) = Make();
+        f.Procs[810] = new FakeNative.P { Name = "GCC.exe", Created = 5 };                                   // user session: full background
+        f.Procs[811] = new FakeNative.P { Name = "chrome.exe", Created = 6 };                                // browser (media): EcoQoS only
+        f.Procs[812] = new FakeNative.P { Name = "CorsairDeviceControlService.exe", Created = 7, Cls = 32 }; // service: timer flag only
+        f.Procs[813] = new FakeNative.P { Name = "svchost.exe", Created = 8 };                               // never
+        e.ApplyBackground(new uint[] { 810, 811 }, 0, false, new uint[] { 812, 813 });
+        Assert.Equal((5u, 5u), (f.Procs[810].EcoCtl, f.Procs[810].EcoState));
+        Assert.Equal((1u, 1u), (f.Procs[811].EcoCtl, f.Procs[811].EcoState));
+        Assert.Equal((4u, 4u), (f.Procs[812].EcoCtl, f.Procs[812].EcoState));
+        Assert.Equal(32u, f.Procs[812].Cls);                                                                // the service keeps its priority
+        Assert.Equal((0u, 0u), (f.Procs[813].EcoCtl, f.Procs[813].EcoState));
+        int w = f.Writes;
+        e.ApplyBackground(new uint[] { 810, 811 }, 0, false, new uint[] { 812, 813 });
+        Assert.Equal(w, f.Writes);                                                                          // nothing written twice
+        e.RevertBackground();
+        Assert.Equal((0u, 0u), (f.Procs[810].EcoCtl, f.Procs[810].EcoState));
+        Assert.Equal((0u, 0u), (f.Procs[812].EcoCtl, f.Procs[812].EcoState));
+    }
+
+    [Fact]
+    public void OneFailingProcessDoesNotStopTheBackgroundLayer()
+    {
+        var (e, f, _) = Make();
+        AppLog.Clear();
+        f.Procs[820] = new FakeNative.P { Name = "odd.exe", Created = 5, Throw = true };
+        f.Procs[821] = new FakeNative.P { Name = "GCC.exe", Created = 6 };
+        f.Procs[822] = new FakeNative.P { Name = "oddservice.exe", Created = 7, Throw = true };
+        f.Procs[823] = new FakeNative.P { Name = "Corsair.exe", Created = 8 };
+        e.ApplyBackground(new uint[] { 820, 821 }, 0, false, new uint[] { 822, 823 });
+        Assert.Equal(16384u, f.Procs[821].Cls);                 // the others are still handled
+        Assert.Equal((4u, 4u), (f.Procs[823].EcoCtl, f.Procs[823].EcoState));
+        Assert.Contains(AppLog.Tail(50), x => x.Msg.Contains("odd.exe") && x.Msg.Contains("Win32Exception"));
+        e.RevertBackground();
+        Assert.Equal(32u, f.Procs[821].Cls);
+    }
+
+    [Fact]
+    public void TimerGuardOffKeepsTheOldBehaviour()
+    {
+        var (e, f, _) = Make();
+        e.TimerGuard = false;
+        f.Procs[810] = new FakeNative.P { Name = "GCC.exe", Created = 5 };
+        f.Procs[812] = new FakeNative.P { Name = "Corsair.exe", Created = 7 };
+        e.ApplyBackground(new uint[] { 810 }, 0, false, new uint[] { 812 });
+        Assert.Equal((1u, 1u), (f.Procs[810].EcoCtl, f.Procs[810].EcoState));
+        Assert.Equal((0u, 0u), (f.Procs[812].EcoCtl, f.Procs[812].EcoState));
     }
 
     [Fact]
@@ -201,7 +252,7 @@ public class EngineTests : IDisposable
     public void SessionRestoresOnlyMatchingProcesses()
     {
         var (e, f, _) = Make();
-        f.Procs[800] = new FakeNative.P { Name = "Discord.exe", Created = 5 };
+        f.Procs[800] = new FakeNative.P { Name = "notepad.exe", Created = 5 };
         e.ApplyAuto(500, Synth2((100, "2", "above", "")), 0xFFFC, Opts());
         e.ApplyBackground(new uint[] { 800 }, 0, false);
         var s = e.Export();

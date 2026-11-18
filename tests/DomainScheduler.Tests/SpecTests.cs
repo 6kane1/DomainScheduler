@@ -20,8 +20,6 @@ public class SpecTests : IDisposable
         Reservation.Reg = new WinReservedRegistry();
         GameMask.IrqHook = null;
         Settings.Backend = new RegistrySettingsBackend();
-        Cleaner.EnvHook = null;
-        Cleaner.RunningHook = null;
         L.Load("en");
     }
 
@@ -193,9 +191,9 @@ public class SpecTests : IDisposable
     }
 
     [Fact]
-    public void ThreeLanguagesLoadWithTheirFontsAndFallBackToTheKey()
+    public void RussianAndEnglishOnlyLoadWithTheirFontsAndFallBackToTheKey()
     {
-        Assert.Equal(3, L.Available.Count);
+        Assert.Equal(new[] { "en", "ru" }, L.Available);
         foreach (var code in L.Available)
         {
             L.Load(code);
@@ -206,59 +204,17 @@ public class SpecTests : IDisposable
         }
         L.Load("ru");
         Assert.NotEqual("Turn on", L.T("Turn on"));
-        L.Load("zh");
-        Assert.Contains("YaHei", L.Family);
+        L.Load("zh");                                  // removed in 1.11.0
+        Assert.Equal("en", L.Lang);
+        Assert.DoesNotContain(typeof(L).Assembly.GetManifestResourceNames(), n => n.EndsWith(".zh.json", StringComparison.OrdinalIgnoreCase));
         L.Load("xx");
         Assert.Equal("en", L.Lang);
         Settings.Set("Language", "ru");
         Assert.Equal("ru", Settings.Language());
         Settings.Set("Language", "klingon");
         Assert.Equal(L.Detect(), Settings.Language());
-    }
-
-    [Fact]
-    public void CleanerScansBeforeCleaningSkipsRunningGuardedAndAskFirst()
-    {
-        string dir = Path.Combine(Path.GetTempPath(), "ds-clean-" + Guid.NewGuid().ToString("N"));
-        string temp = Path.Combine(dir, "temp"), local = Path.Combine(dir, "local");
-        Directory.CreateDirectory(Path.Combine(temp, "sub"));
-        Directory.CreateDirectory(Path.Combine(local, "Spotify", "Storage"));
-        Directory.CreateDirectory(Path.Combine(local, "NVIDIA", "DXCache"));
-        File.WriteAllText(Path.Combine(temp, "a.tmp"), "12345");
-        File.WriteAllText(Path.Combine(temp, "sub", "b.tmp"), "123");
-        File.WriteAllText(Path.Combine(temp, "prefs"), "keep");
-        File.WriteAllText(Path.Combine(local, "Spotify", "Storage", "c.file"), "1");
-        File.WriteAllText(Path.Combine(local, "NVIDIA", "DXCache", "d.bin"), "22");
-        var running = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Spotify.exe" };
-        Cleaner.EnvHook = n => n switch { "TEMP" => temp, "LOCALAPPDATA" => local, _ => "" };
-        Cleaner.RunningHook = () => running;
-        try
-        {
-            var items = Cleaner.Items().ToDictionary(i => i.Key);
-            Assert.False(items.ContainsKey("steam-shader"));
-            var t = items["temp"];
-            Assert.Equal(0, Cleaner.Clean(t, true).Files);            // no Scan: nothing
-            Assert.True(File.Exists(Path.Combine(temp, "a.tmp")));
-            Cleaner.Scan(t);
-            Assert.Equal((2, 8L), (t.Files, t.Size));                 // the guarded "prefs" is not counted
-            File.WriteAllText(Path.Combine(temp, "late.tmp"), "x");   // appeared after the Scan: stays
-            Assert.Equal((2, 8L), (Cleaner.Clean(t, false).Files, 8L));
-            Assert.True(File.Exists(Path.Combine(temp, "prefs")));
-            Assert.True(File.Exists(Path.Combine(temp, "late.tmp")));
-            Assert.Equal(0, Cleaner.Clean(t, true).Files);            // needs a new Scan
-
-            var sp = items["spotify"];
-            Cleaner.Scan(sp);
-            Assert.True(sp.Running);
-            Assert.Equal(0, Cleaner.Clean(sp, true).Files);
-            Assert.True(File.Exists(Path.Combine(local, "Spotify", "Storage", "c.file")));
-
-            var nv = items["nvidia"];
-            Assert.True(nv.AskFirst);
-            Cleaner.Scan(nv);
-            Assert.Equal(0, Cleaner.Clean(nv, false).Files);
-            Assert.Equal(1, Cleaner.Clean(nv, true).Files);
-        }
-        finally { Directory.Delete(dir, true); }
+        Settings.Set("Language", "zh");                // a saved removed language: English, or Russian on a Russian Windows
+        Assert.Equal(L.Detect(), Settings.Language());
+        Assert.Contains(L.Detect(), new[] { "en", "ru" });
     }
 }

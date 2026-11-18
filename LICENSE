@@ -1,0 +1,87 @@
+Domain OS License
+Copyright (c) 2026 Domain OS (https://github.com/6kane1). All rights reserved.
+
+This license covers the Domain OS playbook, Domain OS Toolbox (DomainScheduler), DomainSchedTest, the website and
+every other file of the Domain OS project published from 18 November 2026 on.
+
+1. WHAT YOU MAY DO
+   a) Read and study the source code.
+   b) Download the official releases from the official sources (the Domain OS website, the official GitHub
+      repositories of 6kane1, the official Domain OS Discord server) and use them free of charge on computers you
+      own or control.
+   c) Link to the official pages and talk about the project, including reviews, videos and guides.
+   d) Report problems and suggest changes through the official GitHub repositories or the Discord server. By sending
+      a suggestion or code you allow the author to use it in Domain OS without any obligation.
+
+2. WHAT YOU MAY NOT DO without the author's written permission
+   a) Copy, re-upload, mirror or otherwise distribute the software, its builds or its source code, in whole or in
+      part, changed or unchanged (this includes repacks, other download sites and file-sharing).
+   b) Publish changed versions or anything based on this code or its files: other playbooks, builds, tools or
+      programs.
+   c) Remove or change the name Domain OS, the logo or the author notices, or present the work or any part of it as
+      your own.
+   d) Sell the software, charge for it, include it in a paid product or service, or sublicense it.
+
+   Forking on GitHub is allowed only to the extent the GitHub Terms of Service require (viewing and forking inside
+   GitHub); a fork does not give any of the rights listed in section 2.
+
+3. OTHER PEOPLE'S PARTS
+   Third-party components keep their own licenses (for example the Inter and JetBrains Mono fonts under the SIL Open
+   Font License 1.1, the .NET runtime under the MIT License). This license does not change them.
+
+4. EARLIER VERSIONS
+   Versions published before 18 November 2026 under the MIT License stay under the MIT License for the copies
+   obtained back then. Everything published from 18 November 2026 on is under this license.
+
+5. NO WARRANTY
+   The software is provided "as is", without warranty of any kind. The author is not liable for any damage or loss
+   arising from its use. Anti-cheat developers have not officially confirmed compatibility.
+
+6. END OF THE LICENSE
+   Breaking these terms ends your rights under this license automatically.
+
+Windows is a trademark of Microsoft. Domain OS ships no part of Windows.
+
+--------------------------------------------------------------------------------------------------------------------
+
+Лицензия Domain OS (перевод для удобства; при расхождении действует английский текст выше)
+© 2026 Domain OS (https://github.com/6kane1). Все права защищены.
+
+Лицензия распространяется на плейбук Domain OS, Domain OS Toolbox (DomainScheduler), DomainSchedTest, сайт и все
+остальные файлы проекта Domain OS, опубликованные начиная с 18 ноября 2026 года.
+
+1. ЧТО МОЖНО
+   а) Читать и изучать исходный код.
+   б) Скачивать официальные выпуски из официальных источников (сайт Domain OS, официальные репозитории 6kane1 на
+      GitHub, официальный Discord-сервер Domain OS) и бесплатно пользоваться ими на своих компьютерах.
+   в) Давать ссылки на официальные страницы и рассказывать о проекте: обзоры, видео, гайды.
+   г) Сообщать о проблемах и предлагать изменения через официальные репозитории или Discord. Присылая идею или код,
+      вы разрешаете автору использовать их в Domain OS без каких-либо обязательств.
+
+2. ЧТО НЕЛЬЗЯ без письменного разрешения автора
+   а) Копировать, перезаливать, зеркалировать и иначе распространять программы, сборки или исходный код — целиком
+      или частями, с изменениями или без (в том числе репаки, другие сайты и файлообменники).
+   б) Публиковать изменённые версии или что-либо на основе этого кода и файлов: другие плейбуки, сборки, утилиты,
+      программы.
+   в) Удалять или менять название Domain OS, логотип и упоминания автора, выдавать работу или её часть за свою.
+   г) Продавать, брать за это деньги, включать в платный продукт или услугу, сублицензировать.
+
+   Форк на GitHub допускается только в объёме, которого требуют правила GitHub (просмотр и форк внутри GitHub);
+   форк не даёт ни одного права из раздела 2.
+
+3. ЧУЖИЕ КОМПОНЕНТЫ
+   Сторонние компоненты остаются под своими лицензиями (например, шрифты Inter и JetBrains Mono — SIL Open Font
+   License 1.1, среда .NET — MIT). Эта лицензия их не меняет.
+
+4. РАННИЕ ВЕРСИИ
+   Версии, опубликованные до 18 ноября 2026 года под лицензией MIT, остаются под MIT для копий, полученных тогда.
+   Всё, что опубликовано с 18 ноября 2026 года, — под этой лицензией.
+
+5. БЕЗ ГАРАНТИЙ
+   Программы предоставляются «как есть», без каких-либо гарантий. Автор не отвечает за ущерб или потери от их
+   использования. Разработчики античитов совместимость официально не подтверждали.
+
+6. ПРЕКРАЩЕНИЕ
+   При нарушении этих условий ваши права по этой лицензии прекращаются автоматически.
+
+Windows — товарный знак Microsoft. Domain OS не содержит частей Windows.

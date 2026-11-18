@@ -12,7 +12,7 @@ public sealed class FakeNative : INative
         public ulong Aff = ulong.MaxValue;
         public uint[] Sets = Array.Empty<uint>();
         public uint Io = 2, Mem = 5, EcoCtl, EcoState;
-        public bool BoostDisabled, Protected, Refuse, ReadOnly;
+        public bool BoostDisabled, Protected, Refuse, ReadOnly, Throw;
         public List<ModRange> Mods = new();
     }
 
@@ -83,7 +83,7 @@ public sealed class FakeNative : INative
     public bool SetIo(IntPtr p, uint v) { if (!W(true, Pr(p).ReadOnly)) return false; Pr(p).Io = v; return true; }
     public bool GetMem(IntPtr p, out uint v) { v = Pr(p).Mem; return true; }
     public bool SetMem(IntPtr p, uint v) { if (!W(true, Pr(p).ReadOnly)) return false; Pr(p).Mem = v; return true; }
-    public bool GetEco(IntPtr p, out uint c, out uint s) { c = Pr(p).EcoCtl; s = Pr(p).EcoState; return true; }
+    public bool GetEco(IntPtr p, out uint c, out uint s) { if (Pr(p).Throw) throw new System.ComponentModel.Win32Exception(); c = Pr(p).EcoCtl; s = Pr(p).EcoState; return true; }
     public int EcoError;   // 1 = power throttling is off in this Windows
     public bool SetEco(IntPtr p, uint c, uint s) { if (EcoError != 0) { _err = EcoError; return false; } if (!W(true, Pr(p).ReadOnly)) return false; Pr(p).EcoCtl = c; Pr(p).EcoState = s; return true; }
     public bool GetBoostDisabled(IntPtr p, out bool d) { d = Pr(p).BoostDisabled; return true; }

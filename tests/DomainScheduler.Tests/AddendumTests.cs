@@ -65,10 +65,10 @@ public class AddendumTests : IDisposable
     {
         Assert.Empty(ThreadIni.SelfTest());
         var bundled = ThreadIni.LoadBundled();
-        foreach (var name in new[] { "spotify", "discord", "steam", "steamwebhelper", "dwm", "searchapp", "winlogon", "audiodg", "svchost", "sihost",
+        foreach (var name in new[] { "spotify", "discord", "steam", "steamwebhelper", "dwm", "searchapp", "winlogon", "audiodg", "sihost",
                      "taskhostw", "dllhost", "startmenuexperiencehost", "shellexperiencehost", "textinputhost", "conhost", "explorer", "ctfmon", "ayugram", "winws", "domainscheduler" })
             Assert.True(bundled.Presets.ContainsKey(name + ".exe"), name);
-        Assert.Equal(21, bundled.Presets.Count);
+        Assert.Equal(20, bundled.Presets.Count);   // svchost was removed: it is a protected process and always failed
         Assert.All(bundled.Presets.Values, p => Assert.True(p.Builtin));
         Assert.Equal("off", bundled.Presets["spotify.exe"].Boost);
         Assert.Equal("", bundled.Presets["dwm.exe"].Boost);
@@ -149,7 +149,8 @@ public class AddendumTests : IDisposable
         e.ApplyAuto(500, new Preset { Exe = "cs2.exe" }, 0, new ApplyOptions());
         var tail = AppLog.Tail(10);
         Assert.Contains(tail, x => x.Sev == AppLog.Sev.Warn && x.Msg.Contains("FACEIT"));    // AdviceOnce
-        Assert.Contains(tail, x => x.Sev == AppLog.Sev.Error && x.Msg.Contains("FACEIT"));   // report.Failures
+        // report.Failures: a process that cannot be changed is skipped — a warning in the log file, never an error window
+        Assert.DoesNotContain(tail, x => x.Sev == AppLog.Sev.Error);
         for (int i = 0; i < AppLog.Capacity + 10; i++) AppLog.Add("x" + i);
         Assert.Equal(AppLog.Capacity, AppLog.Tail(int.MaxValue).Count);
     }
@@ -168,7 +169,7 @@ public class LangTests
             Assert.Equal("Жду игру…", L.T("Waiting for the game…"));
             Assert.Equal("Игра: cs2.exe · ускорение включено", L.F("Game: {0} · boost on", "cs2.exe"));
             Assert.Equal("Античит: игра не изменена, фон приглушён", L.T("Anti-cheat: the game is not changed, the background is muted"));
-            Assert.Equal("Ошибка. Всё возвращено как было. Открой Отчёт.", L.T("Error. Everything was put back. Open the Report."));
+            Assert.Equal("Ошибка. Всё возвращено как было. Откройте отчёт.", L.T("Error. Everything was put back. Open the Report."));
             Assert.Equal("Раздел Session Manager\\Kernel не открыть", L.T("The Session Manager\\Kernel key cannot be opened"));
             Assert.Equal("untranslated", L.T("untranslated"));
         }

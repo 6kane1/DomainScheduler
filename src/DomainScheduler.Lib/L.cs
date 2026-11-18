@@ -15,14 +15,17 @@ public static class L
     static List<string> _fonts = new();
     public static string Lang { get; private set; } = "en";
 
-    /// <summary>Languages with a resource, by code ("en" is the keys themselves).</summary>
-    public static IReadOnlyList<string> Available => new[] { "en", "ru", "zh" };
+    /// <summary>Languages with a resource, by code ("en" is the keys themselves). Only English and Russian.</summary>
+    public static IReadOnlyList<string> Available => new[] { "en", "ru" };
 
     /// <summary>The languages' own names (never translated).</summary>
-    public static string NameOf(string code) => code switch { "ru" => "Русский", "zh" => "简体中文", _ => "English" };
+    public static string NameOf(string code) => code switch { "ru" => "Русский", _ => "English" };
 
     /// <summary>The first non-empty font of the current language ("" = the system default).</summary>
     public static string Family => _fonts.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f)) ?? "";
+
+    /// <summary>All fonts of the current language, in order (the UI uses them as a fallback chain).</summary>
+    public static IReadOnlyList<string> Fonts => _fonts.Where(f => !string.IsNullOrWhiteSpace(f)).ToList();
 
     /// <summary>Raised after Load: the UI rebuilds its texts.</summary>
     public static event Action Changed;
@@ -30,6 +33,7 @@ public static class L
     public static void Load(string lang)
     {
         lang = string.IsNullOrWhiteSpace(lang) ? Detect() : lang.Trim().ToLowerInvariant();
+        if (!Available.Contains(lang)) lang = "en";   // a removed language (zh before 1.11.0) or an unknown code
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         var fonts = new List<string>();
         {

@@ -48,6 +48,7 @@ public static class GameMask
         .Where(s => s.Group == 0 && s.LP < 64 && (pin >> s.LP & 1) != 0).Select(s => s.Core).Distinct().Count() == 1;
 
     public const string WideNote = "wide-irq: partial";
+    public const string SmallNote = "irq: several devices on a small processor, only their processors cut";
 
     public static ulong Adjust(Topo t, ulong baseM, ulong add, ulong drop, ulong irq, string mode, out ulong irqDrop, out bool irqIgnored) =>
         Adjust(t, baseM, add, drop, irq, 0, mode, out irqDrop, out irqIgnored, null);
@@ -69,6 +70,14 @@ public static class GameMask
         if (mode == Off || (irq | wide) == 0) return m;
         ulong wideCut = wide & m;
         ulong cut = ((mode == CoreMode ? WholeCores(t, irq) : irq) & m) | wideCut;
+        // 8 cores or fewer: cutting whole cores for several devices costs the game too much (3 of 8 cores was seen on a
+        // 7800X3D). More than one core's worth → only the pinned processors themselves leave; their SMT siblings stay.
+        if (mode == CoreMode && t.Sets != null && t.Sets.Select(s => s.Core).Distinct().Count() <= 8
+            && t.Sets.Where(s => s.LP < 64 && (cut & (1UL << s.LP)) != 0).Select(s => s.Core).Distinct().Count() > 1)
+        {
+            cut = (irq & m) | wideCut;
+            if (notes != null && !notes.Contains(SmallNote)) notes.Add(SmallNote);
+        }
         if (wideCut != 0 && notes != null && !notes.Contains(WideNote)) notes.Add(WideNote);
         if (cut == 0) return m;
         ulong kept = m & ~cut;
@@ -83,6 +92,25 @@ public static class GameMask
 
     /// <summary>Section 22.9: processors that are busy with DPC/ISR right now (null = the live source is off).</summary>
     public static Func<ulong> NoisyHook;
+
+    /// <summary>
+    /// Live interrupt cores for Auto (whole physical cores, measured while the game runs). Returns null while the
+    /// live source is off or not ready yet: Auto then keeps the registry-pin rule.
+    /// </summary>
+    public static Func<Topo, ulong?> BusyHook;
+
+    public const string LiveMode = "Live";
+
+    /// <summary>The base mask without the measured busy interrupt cores (both SMT threads), never more than half of it.</summary>
+    public static GameMaskInfo ForLive(Topo t, ulong baseMask, ulong busy)
+    {
+        var info = new GameMaskInfo { Mode = LiveMode, Base = baseMask, Manual = baseMask };
+        for (int lp = 0; lp < 64; lp++)
+            if ((busy >> lp & 1) != 0) info.IrqDevices.Add(new(L.F("live DPC/ISR on processor {0}", lp), 1UL << lp));
+        info.Irq = busy & t.FullMask();
+        info.Final = Adjust(t, baseMask, 0, 0, info.Irq, 0, ThreadMode, out info.IrqDrop, out info.IrqIgnored, info.Notes);
+        return info;
+    }
 
     static ulong WideMask(Topo t, GameMaskInfo info)
     {

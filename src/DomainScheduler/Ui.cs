@@ -1,428 +1,747 @@
+using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Shapes;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace DomainScheduler.App;
 
-/// <summary>
-/// The only place with colours, sizes and fonts (section 13 tokens). Everything else asks
-/// Ui.B(key), GameC / NonGameC and the size tokens.
-/// </summary>
-static class Ui
+internal static class Ui
 {
-    static readonly Dictionary<string, Color> Palette = new()
-    {
-        ["Bg"] = Color.FromRgb(0x1A, 0x1C, 0x1F), ["Panel"] = Color.FromRgb(0x22, 0x25, 0x28), ["Panel2"] = Color.FromRgb(0x2B, 0x2E, 0x32),
-        ["Line"] = Color.FromRgb(0x3C, 0x40, 0x46), ["Hover"] = Color.FromRgb(0x35, 0x39, 0x3E), ["Sel"] = Color.FromRgb(0x40, 0x45, 0x4B),
-        ["Text"] = Color.FromRgb(0xE6, 0xE7, 0xE9), ["Dim"] = Color.FromRgb(0x9A, 0x9F, 0xA6), ["Faint"] = Color.FromRgb(0x6C, 0x71, 0x78),
-        ["On"] = Color.FromRgb(0x4F, 0xA8, 0x6A), ["Warn"] = Color.FromRgb(0xD9, 0xA4, 0x41), ["Error"] = Color.FromRgb(0xE0, 0x64, 0x5C),
-        ["Game"] = Color.FromRgb(0x57, 0xB2, 0x6E), ["NonGame"] = Color.FromRgb(0x6F, 0x78, 0x84), ["Irq"] = Color.FromRgb(0xD9, 0xA4, 0x41),
-        ["Overlay"] = Color.FromArgb(0xB4, 0x1A, 0x1C, 0x1F), ["None"] = Color.FromArgb(0, 0, 0, 0),
-    };
-    static readonly Dictionary<string, SolidColorBrush> Brushes = new();
+	// The HUD palette (1.14.0, "Cockpit"): near-black, thin lines, pink accent, amber for interrupts and warnings.
+	private static readonly Dictionary<string, Color> Palette = new Dictionary<string, Color>
+	{
+		["Bg"] = Color.FromRgb(6, 6, 8),
+		["Pop"] = Color.FromRgb(19, 20, 25),
+		["Ink"] = Color.FromRgb(42, 24, 32),
+		["Panel"] = Color.FromRgb(14, 15, 19),
+		["Panel2"] = Color.FromArgb(10, byte.MaxValue, byte.MaxValue, byte.MaxValue),
+		["Well"] = Color.FromArgb(90, 0, 0, 0),
+		["Line"] = Color.FromRgb(34, 35, 42),
+		["Line2"] = Color.FromRgb(23, 24, 29),
+		["Hover"] = Color.FromArgb(14, 244, 182, 203),
+		["Sel"] = Color.FromArgb(30, 244, 182, 203),
+		["Strong"] = Color.FromRgb(230, 232, 236),
+		["Text"] = Color.FromRgb(201, 206, 214),
+		["Dim"] = Color.FromRgb(125, 131, 141),
+		["Faint"] = Color.FromRgb(93, 99, 108),
+		["Silver"] = Color.FromRgb(201, 206, 214),
+		["Steel"] = Color.FromRgb(143, 147, 160),
+		["Accent"] = Color.FromRgb(244, 182, 203),
+		["AccentText"] = Color.FromRgb(247, 198, 214),
+		["AccentSoft"] = Color.FromArgb(33, 244, 182, 203),
+		["AccentLine"] = Color.FromArgb(90, 244, 182, 203),
+		["Bracket"] = Color.FromArgb(204, 244, 182, 203),
+		["On"] = Color.FromRgb(244, 182, 203),
+		["Warn"] = Color.FromRgb(232, 194, 122),
+		["WarnSoft"] = Color.FromArgb(22, 232, 194, 122),
+		["WarnLine"] = Color.FromArgb(64, 232, 194, 122),
+		["Error"] = Color.FromRgb(239, 138, 138),
+		["CloseHover"] = Color.FromRgb(122, 46, 54),
+		["Game"] = Color.FromArgb(92, 244, 182, 203),
+		["NonGame"] = Color.FromArgb(56, 143, 147, 160),
+		["Irq"] = Color.FromRgb(232, 194, 122),
+		["Overlay"] = Color.FromArgb(200, 6, 6, 8),
+		["None"] = Color.FromArgb(0, 0, 0, 0),
+		["HazePink"] = Color.FromArgb(33, 244, 182, 203),
+		["HazeSilver"] = Color.FromArgb(26, 190, 198, 214)
+	};
 
-    public static SolidColorBrush B(string key)
-    {
-        if (Brushes.TryGetValue(key, out var b)) return b;
-        b = new SolidColorBrush(Palette.TryGetValue(key, out var c) ? c : Palette["Text"]);
-        b.Freeze();
-        return Brushes[key] = b;
-    }
+	private static readonly Dictionary<string, SolidColorBrush> Brushes = new Dictionary<string, SolidColorBrush>();
 
-    public static Brush GameC => B("Game");
-    public static Brush NonGameC => B("NonGame");
+	public static readonly double FsSmall = Pt(8.5);
 
-    /// <summary>Font sizes are given in points (8.5 / 8.75 / 10 / 48) and used in WPF units.</summary>
-    static double Pt(double pt) => pt * 96.0 / 72.0;
-    public static readonly double FsSmall = Pt(8.5), FsNote = Pt(8.75), FsBody = Pt(10), FsHero = Pt(48);
-    public static readonly Thickness MTop = new(0, 15, 0, 0), MCell = new(0, 1, 6, 0), MRow = new(0, 0, 0, 6);
-    public const double RowH = 28, Gap = 10, IconScale = 0.46;
+	public static readonly double FsNote = Pt(8.75);
 
-    /// <summary>The palette as application resources: the control templates of Theme refer to them by key.</summary>
-    public static void Register(ResourceDictionary res)
-    {
-        foreach (var key in Palette.Keys) res[key] = B(key);
-    }
+	public static readonly double FsBody = Pt(10.0);
 
-    public static FontFamily Font()
-    {
-        string f = L.Family;
-        try { return f.Length > 0 ? new FontFamily(f) : SystemFonts.MessageFontFamily; }
-        catch (Exception) { return SystemFonts.MessageFontFamily; }
-    }
+	public static readonly double FsHero = Pt(48.0);
 
-    public static string Hex(ulong m) => "0x" + m.ToString("X", CultureInfo.InvariantCulture);
+	public static readonly Thickness MTop = new Thickness(0.0, 15.0, 0.0, 0.0);
 
-    public static string Size(long bytes) =>
-        bytes >= 1L << 30 ? (bytes / (double)(1L << 30)).ToString("0.0", CultureInfo.CurrentCulture) + " GB"
-        : bytes >= 1L << 20 ? (bytes / (double)(1L << 20)).ToString("0.0", CultureInfo.CurrentCulture) + " MB"
-        : (bytes / 1024.0).ToString("0", CultureInfo.CurrentCulture) + " KB";
+	public static readonly Thickness MCell = new Thickness(0.0, 1.0, 6.0, 0.0);
 
-    public static TextBlock Text(string s, double size = 0, string brush = "Text", bool bold = false, bool wrap = false) => new()
-    {
-        Text = s ?? "", FontSize = size > 0 ? size : FsBody, Foreground = B(brush), FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal,
-        TextWrapping = wrap ? TextWrapping.Wrap : TextWrapping.NoWrap, TextTrimming = wrap ? TextTrimming.None : TextTrimming.CharacterEllipsis,
-        VerticalAlignment = VerticalAlignment.Center,
-    };
+	public static readonly Thickness MRow = new Thickness(0.0, 0.0, 0.0, 6.0);
 
-    public static TextBlock Head(string s) => new()
-    {
-        Text = s, FontSize = FsBody, FontWeight = FontWeights.SemiBold, Foreground = B("Text"), Margin = MRow,
-    };
+	public const double RowH = 32.0;
 
-    public static TextBlock Note(string s) => Text(s, FsNote, "Dim", wrap: true);
+	public const double Gap = 12.0;
 
-    public static Button Btn(string text, Action click, double minWidth = 96)
-    {
-        var b = new Button { Content = text, MinWidth = minWidth, Height = RowH, Margin = new Thickness(0, 0, 6, 0), FontSize = FsBody };
-        b.Click += (_, _) => click?.Invoke();
-        return b;
-    }
+	public const double IconScale = 0.46;
 
-    /// <summary>A button that asks for a second click instead of a dialog.</summary>
-    public static Button ConfirmBtn(string text, Action act)
-    {
-        var b = new Button { Content = text, MinWidth = 96, Height = RowH, Margin = new Thickness(0, 0, 6, 0), FontSize = FsBody };
-        bool armed = false;
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
-        void Disarm()
-        {
-            timer.Stop();
-            armed = false;
-            b.Content = text;
-            b.Foreground = B("Text");
-        }
-        timer.Tick += (_, _) => Disarm();
-        b.Click += (_, _) =>
-        {
-            if (!armed)
-            {
-                armed = true;
-                b.Content = L.T("Click again to confirm");
-                b.Foreground = B("Warn");
-                timer.Start();
-                return;
-            }
-            Disarm();
-            act?.Invoke();
-        };
-        b.Unloaded += (_, _) => timer.Stop();
-        return b;
-    }
+	public const double Radius = 4.0;
 
-    public static Border Card(UIElement child, double pad = 12) => new()
-    {
-        Background = B("Panel"), BorderBrush = B("Line"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6),
-        Padding = new Thickness(pad), Margin = new Thickness(0, 0, 0, Gap), Child = child,
-    };
+	/// <summary>The embedded fonts (SIL OFL, Fonts/*.ttf as WPF resources); null when they could not be found.</summary>
+	private static readonly Uri FontBase = MakeBase();
 
-    public static StackPanel Row(params UIElement[] items)
-    {
-        var p = new StackPanel { Orientation = Orientation.Horizontal, Margin = MRow };
-        foreach (var i in items) if (i != null) p.Children.Add(i);
-        return p;
-    }
+	private static readonly bool Embedded = HasEmbeddedFonts();
 
-    public static StackPanel Col(params UIElement[] items)
-    {
-        var p = new StackPanel();
-        foreach (var i in items) if (i != null) p.Children.Add(i);
-        return p;
-    }
+	/// <summary>True when the embedded Inter / JetBrains Mono fonts were found (else the system fonts are used).</summary>
+	public static bool EmbeddedFonts => Embedded;
 
-    public static ScrollViewer Scroll(UIElement child) => new()
-    {
-        Content = child, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-        Focusable = false,
-    };
+	private static Uri MakeBase()
+	{
+		try
+		{
+			return new Uri("pack://application:,,,/");
+		}
+		catch (Exception)
+		{
+			return null;
+		}
+	}
 
-    /// <summary>Key and value side by side.</summary>
-    public static UIElement Pair(string k, string v)
-    {
-        var g = new DockPanel { Margin = MCell };
-        var key = Text(k, FsNote, "Dim");
-        key.Margin = new Thickness(0, 0, 8, 0);
-        DockPanel.SetDock(key, Dock.Left);
-        g.Children.Add(key);
-        g.Children.Add(Text(v, FsBody, wrap: true));
-        return g;
-    }
+	/// <summary>JetBrains Mono for numbers and captions; Inter covers the narrow spaces of the captions; then the system.</summary>
+	public static readonly FontFamily Mono = MakeMono();
 
-    public static TextBox Input(string text, double width, Action<string> changed)
-    {
-        var t = new TextBox
-        {
-            Text = text ?? "", Width = width, Height = RowH, Background = B("Panel2"), Foreground = B("Text"), BorderBrush = B("Line"),
-            CaretBrush = B("Text"), SelectionBrush = B("Dim"), VerticalContentAlignment = VerticalAlignment.Center, Padding = new Thickness(6, 0, 6, 0),
-            FontSize = FsBody, Margin = new Thickness(0, 0, 6, 0),
-        };
-        t.TextChanged += (_, _) => changed?.Invoke(t.Text);
-        return t;
-    }
+	private static bool HasEmbeddedFonts()
+	{
+		try
+		{
+			return FontBase != null && Fonts.GetFontFamilies(FontBase, "./Fonts/").Count > 0;
+		}
+		catch (Exception)
+		{
+			return false;
+		}
+	}
 
-    /// <summary>A map of the logical processors: a row per L3 domain, a box per core, a cell per processor.</summary>
-    public static UIElement LpMap(Topo t, Func<CpuSet, (Brush Fill, Brush Ring, string Tip)> look, Action<CpuSet> click = null, double cell = 26)
-    {
-        var tpl = LayoutTemplate.For(t);
-        var root = new StackPanel();
-        foreach (var llc in t.Sets.Where(s => s.Group == 0).GroupBy(s => s.LLC).OrderBy(g => g.Key))
-        {
-            ulong size = t.L3ByLlc.TryGetValue(llc.Key, out var sz) ? sz : 0;
-            string label = L.F("L3 domain {0}", llc.Key) + (size > 0 ? " · " + (size >> 20).ToString(CultureInfo.InvariantCulture) + " MB" : "") +
-                           (t.BigCacheLlc == llc.Key ? " · " + L.T("big cache") : "");
-            root.Children.Add(Text(label, FsSmall, "Dim"));
-            var wrap = new WrapPanel { Margin = new Thickness(0, 3, 0, 8) };
-            foreach (var core in llc.GroupBy(s => s.Core).OrderBy(g => g.Key))
-            {
-                var box = new StackPanel { Orientation = tpl.Stacked ? Orientation.Vertical : Orientation.Horizontal };
-                foreach (var lp in core.OrderBy(s => s.LP))
-                {
-                    var (fill, ring, tip) = look(lp);
-                    var c = new Border
-                    {
-                        Width = cell, Height = cell, Margin = new Thickness(1), CornerRadius = new CornerRadius(3), Background = fill,
-                        BorderBrush = ring ?? B("None"), BorderThickness = new Thickness(2), ToolTip = string.IsNullOrEmpty(tip) ? null : tip,
-                        Child = new TextBlock
-                        {
-                            Text = lp.LP.ToString(CultureInfo.InvariantCulture), FontSize = FsSmall, Foreground = B("Text"),
-                            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-                        },
-                    };
-                    if (click != null)
-                    {
-                        var captured = lp;
-                        c.Cursor = Cursors.Hand;
-                        c.MouseLeftButtonUp += (_, _) => click(captured);
-                    }
-                    box.Children.Add(c);
-                }
-                wrap.Children.Add(new Border
-                {
-                    BorderBrush = B("Line"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(4), Padding = new Thickness(1),
-                    Margin = new Thickness(0, 0, 4, 4), Child = box,
-                });
-            }
-            root.Children.Add(wrap);
-        }
-        return root;
-    }
-}
+	private static FontFamily MakeMono()
+	{
+		try
+		{
+			return Embedded ? new FontFamily(FontBase, "./Fonts/#JetBrains Mono, ./Fonts/#Inter, Consolas, Courier New") : new FontFamily("Consolas, Courier New");
+		}
+		catch (Exception)
+		{
+			return new FontFamily("Consolas");
+		}
+	}
 
-/// <summary>How the processors of one core are laid out in a map.</summary>
-sealed class LayoutTemplate
-{
-    public string Key = "flat";
-    public bool Stacked;
+	public static Brush GameC => B("Game");
 
-    public static LayoutTemplate For(Topo t) =>
-        t == null ? new LayoutTemplate()
-        : t.Hybrid ? new LayoutTemplate { Key = "hybrid", Stacked = true }
-        : t.SMT ? new LayoutTemplate { Key = "smt", Stacked = true }
-        : new LayoutTemplate { Key = "flat" };
-}
+	public static Brush NonGameC => B("NonGame");
 
-/// <summary>A two-column grid of facts.</summary>
-sealed class FactGrid : UniformGrid
-{
-    public FactGrid(int columns = 2) => Columns = columns;
+	public static SolidColorBrush B(string key)
+	{
+		if (Brushes.TryGetValue(key, out var value))
+		{
+			return value;
+		}
+		value = new SolidColorBrush(Palette.TryGetValue(key, out var value2) ? value2 : Palette["Text"]);
+		value.Freeze();
+		return Brushes[key] = value;
+	}
 
-    public FactGrid Add(string k, string v)
-    {
-        Children.Add(Ui.Pair(k, v));
-        return this;
-    }
-}
+	private static double Pt(double pt)
+	{
+		return pt * 96.0 / 72.0;
+	}
 
-/// <summary>A switch with a label and a hint line.</summary>
-sealed class CheckRow : Border
-{
-    bool _checked;
-    readonly TextBlock _hint;
-    readonly Border _box;
-    readonly TextBlock _mark;
-    public event Action<bool> Changed;
+	public static Color C(string key)
+	{
+		if (!Palette.TryGetValue(key, out var value))
+		{
+			return Palette["Text"];
+		}
+		return value;
+	}
 
-    public CheckRow(string label, string hint, bool value)
-    {
-        _checked = value;
-        _box = new Border
-        {
-            Width = 18, Height = 18, CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(1), BorderBrush = Ui.B("Line"),
-            Margin = new Thickness(0, 1, 9, 0), VerticalAlignment = VerticalAlignment.Top,
-        };
-        _mark = new TextBlock { Text = "✓", FontSize = Ui.FsBody, Foreground = Ui.B("Bg"), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-        _box.Child = _mark;
-        _hint = Ui.Note(hint);
-        _hint.Visibility = string.IsNullOrEmpty(hint) ? Visibility.Collapsed : Visibility.Visible;
-        var text = Ui.Col(Ui.Text(label, wrap: true), _hint);
-        var dock = new DockPanel();
-        DockPanel.SetDock(_box, Dock.Left);
-        dock.Children.Add(_box);
-        dock.Children.Add(text);
-        Child = dock;
-        Background = Ui.B("None");
-        Margin = Ui.MRow;
-        Cursor = Cursors.Hand;
-        MouseLeftButtonUp += (_, _) =>
-        {
-            if (!IsEnabled) return;
-            _checked = !_checked;
-            Paint();
-            Changed?.Invoke(_checked);
-        };
-        IsEnabledChanged += (_, _) => Opacity = IsEnabled ? 1 : 0.5;
-        Paint();
-    }
+	public static Brush Backdrop(bool pink)
+	{
+		RadialGradientBrush radialGradientBrush = new RadialGradientBrush();
+		radialGradientBrush.GradientOrigin = (pink ? new Point(0.1, 0.0) : new Point(1.0, 1.0));
+		radialGradientBrush.Center = (pink ? new Point(0.1, 0.0) : new Point(1.0, 1.0));
+		radialGradientBrush.RadiusX = 0.75;
+		radialGradientBrush.RadiusY = 0.75;
+		radialGradientBrush.GradientStops.Add(new GradientStop(C(pink ? "HazePink" : "HazeSilver"), 0.0));
+		radialGradientBrush.GradientStops.Add(new GradientStop(C("None"), 1.0));
+		radialGradientBrush.Freeze();
+		return radialGradientBrush;
+	}
 
-    public bool Checked => _checked;
+	public static Button Primary(Button b, bool on = true)
+	{
+		b.Background = B(on ? "Accent" : "Panel2");
+		b.Foreground = B(on ? "Ink" : "Text");
+		b.BorderBrush = B(on ? "Accent" : "Line");
+		if (on)
+		{
+			b.FontWeight = FontWeights.SemiBold;
+		}
+		return b;
+	}
 
-    /// <summary>Sets the value without raising Changed (programmatic load).</summary>
-    public void Set(bool value)
-    {
-        _checked = value;
-        Paint();
-    }
+	public static Border Pill(string text, bool accent)
+	{
+		return new Border
+		{
+			CornerRadius = new CornerRadius(2.0),
+			Padding = new Thickness(6.0, 2.0, 6.0, 2.0),
+			HorizontalAlignment = HorizontalAlignment.Left,
+			Background = B(accent ? "AccentSoft" : "Panel2"),
+			BorderBrush = B(accent ? "AccentLine" : "Line"),
+			BorderThickness = new Thickness(1.0),
+			Child = new TextBlock
+			{
+				Text = HudMath.Spaced(text),
+				FontSize = FsSmall * 0.95,
+				FontFamily = Mono,
+				FontWeight = FontWeights.Medium,
+				Foreground = B(accent ? "AccentText" : "Text"),
+				TextTrimming = TextTrimming.CharacterEllipsis
+			}
+		};
+	}
 
-    public void Hint(string text)
-    {
-        _hint.Text = text ?? "";
-        _hint.Visibility = string.IsNullOrEmpty(text) ? Visibility.Collapsed : Visibility.Visible;
-    }
+	public static UIElement Kv(string k, TextBlock v)
+	{
+		DockPanel dockPanel = new DockPanel
+		{
+			Margin = new Thickness(0.0, 0.0, 0.0, 0.0)
+		};
+		v.FontFamily = Mono;
+		v.Foreground = B("Strong");
+		DockPanel.SetDock(v, Dock.Right);
+		dockPanel.Children.Add(v);
+		dockPanel.Children.Add(Text(k));
+		return new Border
+		{
+			BorderBrush = B("Line"),
+			BorderThickness = new Thickness(0.0, 0.0, 0.0, 1.0),
+			Padding = new Thickness(0.0, 8.0, 0.0, 8.0),
+			Child = dockPanel
+		};
+	}
 
-    void Paint()
-    {
-        _box.Background = _checked ? Ui.B("On") : Ui.B("Panel2");
-        _mark.Visibility = _checked ? Visibility.Visible : Visibility.Hidden;
-    }
-}
+	public static void SetBar(FrameworkElement bar, double share)
+	{
+		if (bar is Grid grid && grid.ColumnDefinitions.Count == 2)
+		{
+			share = Math.Clamp(share, 0.0, 1.0);
+			grid.ColumnDefinitions[0].Width = new GridLength(share, GridUnitType.Star);
+			grid.ColumnDefinitions[1].Width = new GridLength(1.0 - share, GridUnitType.Star);
+		}
+	}
 
-sealed class Opt
-{
-    public string Key = "", Label = "";
-    public Opt(string key, string label)
-    {
-        Key = key;
-        Label = label;
-    }
-}
+	public static FrameworkElement Bar(double share, bool accent, double height = 3.0)
+	{
+		Grid obj = new Grid
+		{
+			Height = height,
+			ColumnDefinitions = 
+			{
+				new ColumnDefinition
+				{
+					Width = new GridLength(Math.Clamp(share, 0.0, 1.0), GridUnitType.Star)
+				},
+				new ColumnDefinition
+				{
+					Width = new GridLength(1.0 - Math.Clamp(share, 0.0, 1.0), GridUnitType.Star)
+				}
+			}
+		};
+		Border element = new Border
+		{
+			Background = B("Line")
+		};
+		Grid.SetColumnSpan(element, 2);
+		obj.Children.Add(element);
+		obj.Children.Add(new Border
+		{
+			Background = B(accent ? "Accent" : "Steel"),
+			MinWidth = ((share > 0.0) ? height : 0.0)
+		});
+		return obj;
+	}
 
-static class Combo
-{
-    public static ComboBox New(double width, params Opt[] opts)
-    {
-        var cb = new ComboBox { Width = width, Height = Ui.RowH, FontSize = Ui.FsBody, Margin = new Thickness(0, 0, 6, 0) };
-        foreach (var o in opts) cb.Items.Add(new ComboBoxItem { Content = o.Label, Tag = o.Key });
-        if (cb.Items.Count > 0) cb.SelectedIndex = 0;
-        return cb;
-    }
+	public static void Register(ResourceDictionary res)
+	{
+		foreach (string key in Palette.Keys)
+		{
+			res[key] = B(key);
+		}
+	}
 
-    /// <summary>Selects by key; an unknown key selects nothing new and returns false.</summary>
-    public static bool Select(ComboBox cb, string key)
-    {
-        for (int i = 0; i < cb.Items.Count; i++)
-            if (cb.Items[i] is ComboBoxItem it && string.Equals(it.Tag as string, key, StringComparison.OrdinalIgnoreCase))
-            {
-                cb.SelectedIndex = i;
-                return true;
-            }
-        return false;
-    }
+	public static FontFamily Font()
+	{
+		string text = string.Join(", ", L.Fonts);
+		try
+		{
+			if (Embedded)
+			{
+				return new FontFamily(FontBase, "./Fonts/#Inter" + ((text.Length > 0) ? (", " + text) : ", Segoe UI"));
+			}
+			return (text.Length > 0) ? new FontFamily(text) : SystemFonts.MessageFontFamily;
+		}
+		catch (Exception)
+		{
+			return SystemFonts.MessageFontFamily;
+		}
+	}
 
-    public static string Key(ComboBox cb) => (cb.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+	public static string Hex(ulong m)
+	{
+		return "0x" + m.ToString("X", CultureInfo.InvariantCulture);
+	}
 
-    public static void OnChange(ComboBox cb, Action<string> changed) => cb.SelectionChanged += (_, _) => changed(Key(cb));
-}
+	public static string Size(long bytes)
+	{
+		if (bytes < 1073741824)
+		{
+			if (bytes < 1048576)
+			{
+				return ((double)bytes / 1024.0).ToString("0", CultureInfo.CurrentCulture) + " KB";
+			}
+			return ((double)bytes / 1048576.0).ToString("0.0", CultureInfo.CurrentCulture) + " MB";
+		}
+		return ((double)bytes / 1073741824.0).ToString("0.0", CultureInfo.CurrentCulture) + " GB";
+	}
 
-/// <summary>A legend entry: colour, look ("fill" or "ring") and text.</summary>
-sealed class Leg
-{
-    public Brush C;
-    public string Look = "fill", Text = "";
+	public static TextBlock Text(string s, double size = 0.0, string brush = "Text", bool bold = false, bool wrap = false)
+	{
+		return new TextBlock
+		{
+			Text = (s ?? ""),
+			FontSize = ((size > 0.0) ? size : FsBody),
+			Foreground = B(brush),
+			FontWeight = (bold ? FontWeights.SemiBold : FontWeights.Normal),
+			TextWrapping = ((!wrap) ? TextWrapping.NoWrap : TextWrapping.Wrap),
+			TextTrimming = ((!wrap) ? TextTrimming.CharacterEllipsis : TextTrimming.None),
+			VerticalAlignment = VerticalAlignment.Center
+		};
+	}
 
-    public UIElement Build()
-    {
-        var sw = new Border
-        {
-            Width = 12, Height = 12, CornerRadius = new CornerRadius(2), Margin = new Thickness(0, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center,
-            Background = Look == "fill" ? C : Ui.B("None"), BorderBrush = C, BorderThickness = new Thickness(2),
-        };
-        var p = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 14, 0) };
-        p.Children.Add(sw);
-        p.Children.Add(Ui.Text(Text, Ui.FsNote, "Dim"));
-        return p;
-    }
+	/// <summary>A panel caption in the HUD style: a pink bar, then spaced capitals in the mono font.</summary>
+	public static TextBlock Head(string s)
+	{
+		TextBlock t = new TextBlock
+		{
+			FontSize = FsSmall,
+			FontFamily = Mono,
+			FontWeight = FontWeights.SemiBold,
+			Foreground = B("Dim"),
+			Margin = new Thickness(0.0, 0.0, 0.0, 10.0),
+			TextTrimming = TextTrimming.CharacterEllipsis
+		};
+		SetHead(t, s);
+		return t;
+	}
 
-    public static UIElement Line(params Leg[] legs)
-    {
-        var p = new WrapPanel { Margin = Ui.MRow };
-        foreach (var l in legs) p.Children.Add(l.Build());
-        return p;
-    }
-}
+	/// <summary>Sets the text of a caption made by Head (the bar and the capitals stay).</summary>
+	public static void SetHead(TextBlock t, string s)
+	{
+		t.Inlines.Clear();
+		t.Inlines.Add(new System.Windows.Documents.Run("▍ ")
+		{
+			Foreground = B("Accent")
+		});
+		t.Inlines.Add(new System.Windows.Documents.Run(HudMath.Spaced(s)));
+	}
 
-/// <summary>A plain table: a header, rows of cells, one selected row.</summary>
-sealed class Table
-{
-    readonly (string Head, double Width)[] _cols;      // Width: > 0 pixels, 0 = the rest
-    readonly StackPanel _rows = new();
-    readonly List<(object Tag, Border Row)> _items = new();
-    public readonly DockPanel Root = new();
-    public object Selected { get; private set; }
-    public event Action SelectionChanged;
+	/// <summary>Spaced capitals in the mono font (captions, tiles, the header).</summary>
+	public static TextBlock Caps(string s, double size = 0.0, string brush = "Dim", bool semi = true)
+	{
+		return new TextBlock
+		{
+			Text = HudMath.Spaced(s),
+			FontFamily = Mono,
+			FontSize = ((size > 0.0) ? size : FsSmall),
+			FontWeight = (semi ? FontWeights.SemiBold : FontWeights.Medium),
+			Foreground = B(brush),
+			TextTrimming = TextTrimming.CharacterEllipsis,
+			VerticalAlignment = VerticalAlignment.Center
+		};
+	}
 
-    public Table(params (string Head, double Width)[] cols)
-    {
-        _cols = cols;
-        var head = MakeRow(cols.Select(c => (UIElement)Ui.Text(c.Head, Ui.FsSmall, "Dim")).ToArray());
-        var hb = new Border { Child = head, BorderBrush = Ui.B("Line"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(6, 0, 14, 4) };
-        DockPanel.SetDock(hb, Dock.Top);
-        Root.Children.Add(hb);
-        Root.Children.Add(Ui.Scroll(_rows));
-    }
+	/// <summary>A big mono number with a small unit after it ("436 FPS").</summary>
+	public static void SetValue(TextBlock t, string value, string unit, string brush = "Strong")
+	{
+		// Called every second with mostly the same text: rebuild (and re-measure) only when something changed.
+		string key = value + "\u0001" + unit + "\u0001" + brush + "\u0001" + t.FontSize.ToString(CultureInfo.InvariantCulture);
+		if (t.Tag is string old && old == key)
+		{
+			return;
+		}
+		t.Tag = key;
+		t.Inlines.Clear();
+		t.Inlines.Add(new System.Windows.Documents.Run(value ?? "")
+		{
+			Foreground = B(brush)
+		});
+		if (!string.IsNullOrEmpty(unit))
+		{
+			t.Inlines.Add(new System.Windows.Documents.Run(" " + unit)
+			{
+				FontSize = Math.Max(FsSmall, t.FontSize * 0.42),
+				FontWeight = FontWeights.Medium,
+				Foreground = B("Dim")
+			});
+		}
+	}
 
-    Grid MakeRow(UIElement[] cells)
-    {
-        var g = new Grid();
-        for (int i = 0; i < _cols.Length; i++)
-        {
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = _cols[i].Width > 0 ? new GridLength(_cols[i].Width) : new GridLength(1, GridUnitType.Star) });
-            if (i >= cells.Length || cells[i] == null) continue;
-            if (cells[i] is FrameworkElement fe && fe.Margin == default) fe.Margin = new Thickness(0, 0, 8, 0);
-            Grid.SetColumn(cells[i], i);
-            g.Children.Add(cells[i]);
-        }
-        return g;
-    }
+	public static TextBlock Note(string s)
+	{
+		return Text(s, FsNote, "Dim", bold: false, wrap: true);
+	}
 
-    /// <summary>Replaces the rows; the selection is dropped (a rebuilt list has no selected row).</summary>
-    public void SetRows(IEnumerable<(object Tag, UIElement[] Cells)> rows)
-    {
-        _rows.Children.Clear();
-        _items.Clear();
-        Selected = null;
-        foreach (var (tag, cells) in rows)
-        {
-            var b = new Border { Child = MakeRow(cells), Padding = new Thickness(6, 3, 6, 3), Background = Ui.B("None"), CornerRadius = new CornerRadius(3), MinHeight = 24 };
-            object captured = tag;
-            b.MouseLeftButtonUp += (_, _) => Select(captured);
-            b.MouseEnter += (_, _) => { if (!Equals(Selected, captured)) b.Background = Ui.B("Hover"); };
-            b.MouseLeave += (_, _) => { if (!Equals(Selected, captured)) b.Background = Ui.B("None"); };
-            _items.Add((tag, b));
-            _rows.Children.Add(b);
-        }
-    }
+	public static Button Btn(string text, Action click, double minWidth = 96.0)
+	{
+		Button button = new Button();
+		button.Content = text;
+		button.MinWidth = minWidth;
+		button.Height = 30.0;
+		button.Margin = new Thickness(0.0, 0.0, 6.0, 0.0);
+		button.FontSize = FsBody;
+		button.Click += delegate
+		{
+			click?.Invoke();
+		};
+		return button;
+	}
 
-    public void Select(object tag, bool raise = true)
-    {
-        Selected = tag;
-        foreach (var (t, row) in _items) row.Background = Equals(t, tag) ? Ui.B("Sel") : Ui.B("None");
-        if (raise) SelectionChanged?.Invoke();
-    }
+	public static Button ConfirmBtn(string text, Action act)
+	{
+		Button b = new Button
+		{
+			Content = text,
+			MinWidth = 96.0,
+			Height = 30.0,
+			Margin = new Thickness(0.0, 0.0, 6.0, 0.0),
+			FontSize = FsBody
+		};
+		bool armed = false;
+		object fg0 = null;
+		object bg0 = null;
+		object bd0 = null;
+		DispatcherTimer timer = new DispatcherTimer
+		{
+			Interval = TimeSpan.FromSeconds(4.0)
+		};
+		timer.Tick += delegate
+		{
+			Disarm();
+		};
+		b.Click += delegate
+		{
+			if (!armed)
+			{
+				armed = true;
+				fg0 = b.ReadLocalValue(Control.ForegroundProperty);
+				bg0 = b.ReadLocalValue(Control.BackgroundProperty);
+				bd0 = b.ReadLocalValue(Control.BorderBrushProperty);
+				b.Content = L.T("Click again to confirm");
+				b.Foreground = B("Warn");
+				b.Background = B("WarnSoft");
+				b.BorderBrush = B("Warn");
+				timer.Start();
+			}
+			else
+			{
+				Disarm();
+				act?.Invoke();
+			}
+		};
+		b.Unloaded += delegate
+		{
+			timer.Stop();
+		};
+		return b;
+		void Disarm()
+		{
+			timer.Stop();
+			armed = false;
+			b.Content = text;
+			Restore(Control.ForegroundProperty, fg0);
+			Restore(Control.BackgroundProperty, bg0);
+			Restore(Control.BorderBrushProperty, bd0);
+		}
+		void Restore(DependencyProperty p, object v)
+		{
+			if (v is Brush brush)
+			{
+				b.SetValue(p, brush);
+			}
+			else
+			{
+				b.ClearValue(p);
+			}
+		}
+	}
 
-    public int Count => _items.Count;
+	/// <summary>A HUD panel: dark fill, a thin line, pink corner brackets top-left and bottom-right. Callers only set
+	/// the Margin of the returned border.</summary>
+	public static Border Card(UIElement child, double pad = 12.0)
+	{
+		Border border = Panel(child, new Thickness(pad + 3.0, pad + 1.0, pad + 3.0, pad + 1.0));
+		border.Margin = new Thickness(0.0, 0.0, 0.0, 10.0);
+		return border;
+	}
+
+	private static Geometry _bracketTl;
+
+	private static Geometry _bracketBr;
+
+	private static Pen _bracketPen;
+
+	/// <summary>The panel without a margin, with the padding given.</summary>
+	public static Border Panel(UIElement child, Thickness pad, bool brackets = true)
+	{
+		Grid grid = new Grid();
+		grid.Children.Add(new Border
+		{
+			Background = B("Panel"),
+			BorderBrush = B("Line"),
+			BorderThickness = new Thickness(1.0),
+			CornerRadius = new CornerRadius(Radius),
+			Padding = pad,
+			Child = child
+		});
+		if (brackets)
+		{
+			grid.Children.Add(Bracket(top: true));
+			grid.Children.Add(Bracket(top: false));
+		}
+		return new Border
+		{
+			Child = grid
+		};
+	}
+
+	/// <summary>A 10 px corner bracket drawn over the panel's line (not hit-testable).</summary>
+	public static FrameworkElement Bracket(bool top)
+	{
+		if (_bracketPen == null)
+		{
+			_bracketPen = new Pen(B("Bracket"), 1.0);
+			_bracketPen.Freeze();
+			_bracketTl = Geometry.Parse("M0.5,10 L0.5,0.5 L10,0.5");
+			_bracketTl.Freeze();
+			_bracketBr = Geometry.Parse("M0,9.5 L9.5,9.5 L9.5,0");
+			_bracketBr.Freeze();
+		}
+		DrawingGroup drawing = new DrawingGroup();
+		drawing.Children.Add(new GeometryDrawing(null, _bracketPen, top ? _bracketTl : _bracketBr));
+		drawing.Freeze();
+		return new Image
+		{
+			Source = new DrawingImage(drawing),
+			Width = 10.0,
+			Height = 10.0,
+			Stretch = Stretch.None,
+			IsHitTestVisible = false,
+			SnapsToDevicePixels = true,
+			HorizontalAlignment = (top ? HorizontalAlignment.Left : HorizontalAlignment.Right),
+			VerticalAlignment = (top ? VerticalAlignment.Top : VerticalAlignment.Bottom)
+		};
+	}
+
+	private static ImageBrush _grid;
+
+	/// <summary>The window background: near-black with a faint 24 px grid (one frozen 24x24 tile, cheap to draw).</summary>
+	public static Brush GridBackground()
+	{
+		if (_grid != null)
+		{
+			return _grid;
+		}
+		try
+		{
+			const int n = 24;
+			Color bg = C("Bg");
+			Color line = Color.FromRgb(11, 11, 14);
+			byte[] px = new byte[n * n * 4];
+			for (int y = 0; y < n; y++)
+			{
+				for (int x = 0; x < n; x++)
+				{
+					Color c = (x == 0 || y == 0) ? line : bg;
+					int i = (y * n + x) * 4;
+					px[i] = c.B;
+					px[i + 1] = c.G;
+					px[i + 2] = c.R;
+					px[i + 3] = byte.MaxValue;
+				}
+			}
+			BitmapSource bmp = BitmapSource.Create(n, n, 96.0, 96.0, PixelFormats.Bgra32, null, px, n * 4);
+			bmp.Freeze();
+			ImageBrush brush = new ImageBrush(bmp)
+			{
+				TileMode = TileMode.Tile,
+				Viewport = new Rect(0.0, 0.0, n, n),
+				ViewportUnits = BrushMappingMode.Absolute,
+				Stretch = Stretch.None
+			};
+			brush.Freeze();
+			_grid = brush;
+			return brush;
+		}
+		catch (Exception)
+		{
+			return B("Bg");
+		}
+	}
+
+	public static StackPanel Row(params UIElement[] items)
+	{
+		StackPanel stackPanel = new StackPanel
+		{
+			Orientation = Orientation.Horizontal,
+			Margin = MRow
+		};
+		foreach (UIElement uIElement in items)
+		{
+			if (uIElement != null)
+			{
+				stackPanel.Children.Add(uIElement);
+			}
+		}
+		return stackPanel;
+	}
+
+	public static StackPanel Col(params UIElement[] items)
+	{
+		StackPanel stackPanel = new StackPanel();
+		foreach (UIElement uIElement in items)
+		{
+			if (uIElement != null)
+			{
+				stackPanel.Children.Add(uIElement);
+			}
+		}
+		return stackPanel;
+	}
+
+	public static ScrollViewer Scroll(UIElement child)
+	{
+		return new ScrollViewer
+		{
+			Content = child,
+			VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+			HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+			Focusable = false
+		};
+	}
+
+	public static UIElement Pair(string k, string v)
+	{
+		DockPanel obj = new DockPanel
+		{
+			Margin = MCell
+		};
+		TextBlock textBlock = Text(k, FsNote, "Dim");
+		textBlock.Margin = new Thickness(0.0, 0.0, 8.0, 0.0);
+		DockPanel.SetDock(textBlock, Dock.Left);
+		obj.Children.Add(textBlock);
+		obj.Children.Add(Text(v, FsBody, "Text", bold: false, wrap: true));
+		return obj;
+	}
+
+	public static TextBox Input(string text, double width, Action<string> changed)
+	{
+		TextBox t = new TextBox
+		{
+			Text = (text ?? ""),
+			Width = width,
+			Height = 30.0,
+			Background = B("Panel2"),
+			Foreground = B("Strong"),
+			BorderBrush = B("Line"),
+			CaretBrush = B("Strong"),
+			SelectionBrush = B("Dim"),
+			VerticalContentAlignment = VerticalAlignment.Center,
+			Padding = new Thickness(6.0, 0.0, 6.0, 0.0),
+			FontSize = FsBody,
+			Margin = new Thickness(0.0, 0.0, 6.0, 0.0)
+		};
+		t.TextChanged += delegate
+		{
+			changed?.Invoke(t.Text);
+		};
+		return t;
+	}
+
+	public static UIElement LpMap(Topo t, Func<CpuSet, (Brush Fill, Brush Ring, string Tip)> look, Action<CpuSet> click = null, double cell = 26.0)
+	{
+		LayoutTemplate layoutTemplate = LayoutTemplate.For(t);
+		StackPanel stackPanel = new StackPanel();
+		foreach (IGrouping<byte, CpuSet> item4 in from s in t.Sets
+			where s.Group == 0
+			group s by s.LLC into g
+			orderby g.Key
+			select g)
+		{
+			ulong value;
+			ulong num = (t.L3ByLlc.TryGetValue(item4.Key, out value) ? value : 0);
+			string s2 = L.F("L3 domain {0}", item4.Key) + ((num != 0) ? (" · " + (num >> 20).ToString(CultureInfo.InvariantCulture) + " MB") : "") + ((t.BigCacheLlc == item4.Key) ? (" · " + L.T("big cache")) : "");
+			stackPanel.Children.Add(Text(s2, FsSmall, "Dim"));
+			WrapPanel wrapPanel = new WrapPanel
+			{
+				Margin = new Thickness(0.0, 3.0, 0.0, 8.0)
+			};
+			foreach (IGrouping<byte, CpuSet> item5 in from s in item4
+				group s by s.Core into g
+				orderby g.Key
+				select g)
+			{
+				StackPanel stackPanel2 = new StackPanel
+				{
+					Orientation = (layoutTemplate.Stacked ? Orientation.Vertical : Orientation.Horizontal)
+				};
+				foreach (CpuSet item6 in item5.OrderBy((CpuSet s) => s.LP))
+				{
+					(Brush, Brush, string) tuple = look(item6);
+					Brush item = tuple.Item1;
+					Brush item2 = tuple.Item2;
+					string item3 = tuple.Item3;
+					Border border = new Border
+					{
+						Width = cell,
+						Height = cell,
+						Margin = new Thickness(1.0),
+						CornerRadius = new CornerRadius(2.0),
+						Background = item,
+						BorderBrush = (item2 ?? B("None")),
+						BorderThickness = new Thickness(2.0),
+						ToolTip = (string.IsNullOrEmpty(item3) ? null : item3),
+						Child = new TextBlock
+						{
+							Text = item6.LP.ToString(CultureInfo.InvariantCulture),
+							FontSize = FsSmall,
+							Foreground = B("Strong"),
+							FontFamily = Mono,
+							HorizontalAlignment = HorizontalAlignment.Center,
+							VerticalAlignment = VerticalAlignment.Center
+						}
+					};
+					if (click != null)
+					{
+						CpuSet captured = item6;
+						border.Cursor = Cursors.Hand;
+						border.MouseLeftButtonUp += delegate
+						{
+							click(captured);
+						};
+					}
+					stackPanel2.Children.Add(border);
+				}
+				wrapPanel.Children.Add(new Border
+				{
+					BorderBrush = B("Line"),
+					BorderThickness = new Thickness(1.0),
+					CornerRadius = new CornerRadius(3.0),
+					Padding = new Thickness(2.0),
+					Margin = new Thickness(0.0, 0.0, 5.0, 5.0),
+					Child = stackPanel2
+				});
+			}
+			stackPanel.Children.Add(wrapPanel);
+		}
+		return stackPanel;
+	}
 }

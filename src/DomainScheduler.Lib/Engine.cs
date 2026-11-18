@@ -774,7 +774,7 @@ public sealed class Engine
             if (!_n.TimerSet(finest, true, out uint actual))
             {
                 _timerRequested = false;
-                AppLog.Add(L.T("Timer resolution: the request was refused"), AppLog.Sev.Error);
+                AppLog.Add(L.T("Timer resolution: the request was refused"), AppLog.Sev.Warn);
                 return false;
             }
             AppLog.Add(L.F("Timer resolution requested: {0:0.00} ms (was {1:0.00} ms)", actual / 10000.0, current / 10000.0));
@@ -806,7 +806,8 @@ public sealed class Engine
     void Report(ApplyReport rep)
     {
         foreach (var f in rep.Failures)
-            if (_failureOnce.Add(rep.Exe + ": " + f)) AppLog.Add(rep.Exe + ": " + f, AppLog.Sev.Error);
+            // a process Windows does not let us change (protected, system): expected, it is skipped — a note in the log file, not an error window
+            if (_failureOnce.Add(rep.Exe + ": " + f)) AppLog.Add(rep.Exe + ": " + f, AppLog.Sev.Warn);
         LastReports.RemoveAll(r => r.Pid == rep.Pid);
         LastReports.Add(rep);
         if (LastReports.Count > 32) LastReports.RemoveAt(0);
@@ -1036,11 +1037,12 @@ public sealed class Engine
 
     /// <summary>
     /// Lowers background programs (section 12.8): baselines of all of them first (then the
-    /// session is saved), then BelowNormal (only lowering), I/O very low, memory low, EcoQoS on
+    /// session is saved), then BelowNormal (only lowering), I/O low (never "very low": that starves a program's disk
+    /// reads behind the game's), memory low, EcoQoS on
     /// and, when the mask does not mix with the reserved processors, the background mask.
     /// Returns how many processes were changed.
     /// </summary>
-    public int ApplyBackground(IEnumerable<uint> pids, ulong bgMask, bool doAffinity)
+    public int ApplyBackground(IEnumerable<uint> pids, ulong bgMask, bool doAffinity, IEnumerable<uint> timerOnly = null)
     {
         lock (_gate)
         {
@@ -1056,30 +1058,75 @@ public sealed class Engine
                 foreach (uint pid in pids)
                 {
                     string exe = names.TryGetValue(pid, out var np) ? np.Name : "";
-                    if (GateHook?.Invoke(pid, exe) != null || Guard.IsAntiCheatProcess(exe)) continue;
-                    IntPtr h = _n.OpenProcessGraceful(pid, out int level);
-                    if (level < 0) continue;
-                    if (_n.IsProtected(h)) { _n.Close(h); continue; }
-                    long created = _n.ProcessCreated(h);
-                    if (_born.TryGetValue(pid, out long b) && b != created) Forget(pid);
-                    _born[pid] = created;
-                    if (!_procBefore.ContainsKey(pid)) added = true;
-                    Baseline(pid, h, created, exe, true);
-                    open.Add((pid, h, level));
+                    IntPtr h = IntPtr.Zero;
+                    try
+                    {
+                        if (BackgroundDeny.Contains(exe) || GateHook?.Invoke(pid, exe) != null || Guard.IsAntiCheatProcess(exe)) continue;
+                        h = _n.OpenProcessGraceful(pid, out int level);
+                        if (level < 0) continue;
+                        if (_n.IsProtected(h)) { _n.Close(h); continue; }
+                        long created = _n.ProcessCreated(h);
+                        if (_born.TryGetValue(pid, out long b) && b != created) Forget(pid);
+                        _born[pid] = created;
+                        if (!_procBefore.ContainsKey(pid)) added = true;
+                        Baseline(pid, h, created, exe, true);
+                        open.Add((pid, h, level));
+                    }
+                    catch (Exception ex)
+                    {
+                        // One odd process must never stop the background layer (or Auto with it).
+                        if (h != IntPtr.Zero && !open.Any(o => o.h == h)) _n.Close(h);
+                        BgSkip(exe, ex);
+                    }
                 }
                 if (added) BeforeMutate?.Invoke();
                 int changed = 0;
                 uint below = PRIO["below"];
                 foreach (var (pid, h, level) in open)
+                try
                 {
                     long before = SetCalls;
                     if (_n.GetPriorityClass(h, out uint cls) && (cls == PRIO["normal"] || cls == PRIO["above"] || cls == PRIO["high"]))
                         Set(_n.SetPriorityClass(h, below));
-                    if (_n.GetIo(h, out uint io) && io > IOP["verylow"]) Set(_n.SetIo(h, IOP["verylow"]));
+                    if (_n.GetIo(h, out uint io) && io > IOP["low"]) Set(_n.SetIo(h, IOP["low"]));
                     if (_n.GetMem(h, out uint mem) && mem > MEM["low"]) Set(_n.SetMem(h, MEM["low"]));
-                    if (!_n.GetEco(h, out uint c, out uint s) || c != 1 || s != 1) Set(_n.SetEco(h, 1, 1));
+                    uint want = TimerGuard && !KeepsTimer(names.TryGetValue(pid, out var nm) ? nm.Name : "") ? EcoAndTimer : EcoOnly;
+                    if (!_n.GetEco(h, out uint c, out uint s) || c != want || s != want) SetEcoGuarded(h, want);
                     if (affOk && level >= 1 && _n.GetAffinity(h, out ulong aff) && aff != bg) Set(_n.SetAffinity(h, bg));
                     if (SetCalls != before) changed++;
+                }
+                catch (Exception ex) { BgSkip(names.TryGetValue(pid, out var nx) ? nx.Name : pid.ToString(CultureInfo.InvariantCulture), ex); }
+                // Timer guard for processes outside the user's session (services such as RGB and peripheral
+                // daemons): only their timer-resolution requests are ignored; priority, I/O, memory, EcoQoS and
+                // affinity stay untouched. The baseline keeps their original masks for the revert.
+                if (TimerGuard && timerOnly != null && !_timerUnsupported)
+                {
+                    var extra = new List<IntPtr>();
+                    try
+                    {
+                        bool addedT = false;
+                        foreach (uint pid in timerOnly)
+                        try
+                        {
+                            string exe = names.TryGetValue(pid, out var np) ? np.Name : "";
+                            if (KeepsTimer(exe) || BackgroundDeny.Contains(exe) || GateHook?.Invoke(pid, exe) != null || Guard.IsAntiCheatProcess(exe)) continue;
+                            IntPtr h = _n.OpenProcessGraceful(pid, out int level);
+                            if (level < 0) continue;
+                            extra.Add(h);
+                            if (_n.IsProtected(h) || !_n.GetEco(h, out uint c, out uint st)) continue;
+                            if ((c & TimerBit) != 0 && (st & TimerBit) != 0) continue;
+                            long created = _n.ProcessCreated(h);
+                            if (_born.TryGetValue(pid, out long b) && b != created) Forget(pid);
+                            _born[pid] = created;
+                            if (!_procBefore.ContainsKey(pid)) { addedT = true; Baseline(pid, h, created, exe, true); }
+                            if (addedT) { BeforeMutate?.Invoke(); addedT = false; }
+                            long before = SetCalls;
+                            SetEcoGuarded(h, c | TimerBit, st | TimerBit);
+                            if (SetCalls != before) changed++;
+                        }
+                        catch (Exception ex) { BgSkip(names.TryGetValue(pid, out var nt) ? nt.Name : pid.ToString(CultureInfo.InvariantCulture), ex); }
+                    }
+                    finally { foreach (var h in extra) _n.Close(h); }
                 }
                 return changed;
             }
@@ -1088,6 +1135,60 @@ public sealed class Engine
                 foreach (var (_, h, _) in open) _n.Close(h);
             }
         }
+    }
+
+    readonly HashSet<string> _bgSkipLogged = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A process the background layer could not handle is skipped; the reason is logged once per name.</summary>
+    void BgSkip(string exe, Exception ex)
+    {
+        if (_bgSkipLogged.Add(exe ?? "")) AppLog.Add(L.F("Background: {0} skipped ({1})", exe, AppLog.Describe(ex)), AppLog.Sev.Warn);
+    }
+
+    // ---- timer guard ------------------------------------------------------------------------------
+
+    /// <summary>
+    /// When on, background processes also get PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION (Windows 11):
+    /// Windows stops honouring their requests for a finer system timer (a peripheral service asking for 0.5 ms
+    /// keeps the whole system ticking at 2000 Hz). The game's own request is never touched. Reverted with the
+    /// rest of the background baseline; on Windows 10 the flag is refused and only EcoQoS is set, as before.
+    /// </summary>
+    public bool TimerGuard { get; set; } = true;
+    const uint TimerBit = 4;                 // PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+    const uint EcoOnly = 1, EcoAndTimer = 1 | TimerBit;
+    bool _timerUnsupported;
+
+    /// <summary>Processes whose timing must not be coarsened: system, audio and voice, streaming, browsers (media).</summary>
+    static readonly HashSet<string> TimerKeepers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "System", "Registry", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "svchost.exe",
+        "dwm.exe", "audiodg.exe", "fontdrvhost.exe", "MsMpEng.exe", "explorer.exe",
+        "Discord.exe", "Vesktop.exe", "ts3client_win64.exe", "TeamSpeak.exe", "mumble.exe", "Spotify.exe",
+        "obs64.exe", "obs32.exe", "Streamlabs OBS.exe", "Streamlabs Desktop.exe", "NVIDIA Share.exe", "nvcontainer.exe",
+        "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "brave.exe", "vivaldi.exe", "msedgewebview2.exe",
+        "steam.exe", "steamwebhelper.exe",
+    };
+
+    public static bool KeepsTimer(string exe) => TimerKeepers.Contains(exe ?? "") || BackgroundDeny.Contains(exe);
+
+    /// <summary>Writes the power-throttling masks; if Windows refuses the timer flag (Windows 10), retries without it.</summary>
+    void SetEcoGuarded(IntPtr h, uint control, uint state = uint.MaxValue)
+    {
+        if (state == uint.MaxValue) state = control;
+        if ((control & TimerBit) != 0 && _timerUnsupported) { control &= ~TimerBit; state &= ~TimerBit; }
+        if (_n.SetEco(h, control, state)) { Set(true); return; }
+        if ((control & TimerBit) != 0)
+        {
+            int err = _n.LastError();
+            if (err is 87 or 1 or 50)
+            {
+                _timerUnsupported = true;
+                AppLog.Add(L.T("Timer guard: this Windows does not support ignoring timer requests; only EcoQoS is set"), AppLog.Sev.Info);
+                Set(_n.SetEco(h, control & ~TimerBit, state & ~TimerBit));
+                return;
+            }
+        }
+        Set(false);
     }
 
     // ---- revert -----------------------------------------------------------------------------------

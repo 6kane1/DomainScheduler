@@ -1,4 +1,4 @@
-using Xunit;
+﻿using Xunit;
 
 namespace DomainScheduler.Tests;
 
@@ -53,7 +53,7 @@ public class AutoTests : IDisposable
         Reservation.Reg = new FakeReserved();
         Settings.Backend = new MemorySettingsBackend();
         Settings.ResetReads();
-        _f.Procs[800] = new FakeNative.P { Name = "Discord.exe", Created = 5 };
+        _f.Procs[800] = new FakeNative.P { Name = "GCC.exe", Created = 5 };
         _f.Procs[801] = new FakeNative.P { Name = "svchost.exe", Created = 6 };
         _f.Procs[1] = new FakeNative.P { Name = "DomainScheduler.exe", Created = 1 };
         _p.Session[801] = 0;
@@ -147,7 +147,7 @@ public class AutoTests : IDisposable
     }
 
     [Fact]
-    public void AltTabThreeSecondsKeepsTwentyReverts()
+    public void AltTabNeverReverts()
     {
         _c.Click();
         StartGame();
@@ -160,9 +160,7 @@ public class AutoTests : IDisposable
         Assert.Equal(AutoState.Active, _c.State);
         _p.Fg = 800;
         Seconds(20);
-        Assert.Equal(AutoState.Armed, _c.State);
-        Assert.Equal(32u, _f.Procs[500].Cls);
-        Assert.Equal(16384u, _f.Procs[800].Cls);   // the background stays muted while armed
+        Assert.Equal(AutoState.Active, _c.State);   // alt-tab no longer reverts: the changes stay while the game lives
     }
 
     [Fact]
@@ -182,6 +180,28 @@ public class AutoTests : IDisposable
         Seconds(7);
         Assert.Equal(AutoState.Active, _c.State);
         Assert.Equal(32768u, _f.Procs[500].Cls);
+    }
+
+    [Fact]
+    public void ClosingGameThatLosesItsThreadsFirstKeepsAutoOn()
+    {
+        _c.Click();
+        StartGame();
+        Seconds(7);
+        Assert.Equal(AutoState.Active, _c.State);
+        // The game is closing: its threads are gone, the process object still exists for a moment.
+        foreach (var tid in _f.Threads.Where(kv => kv.Value.Pid == 500).Select(kv => kv.Key).ToList()) _f.Threads.Remove(tid);
+        Seconds(12);
+        Assert.NotEqual(AutoState.Idle, _c.State);   // a normal end, not a watchdog revert that switches Auto off
+        _f.Procs.Remove(500);
+        _p.Windows.Remove(500);
+        _p.Cpu.Remove(500);
+        Seconds(2);
+        _f.Procs[500] = new FakeNative.P { Name = "cs2.exe", Created = 99, Mods = FakeNative.Cs2().Procs[500].Mods };
+        foreach (var kv in FakeNative.Cs2().Threads.Where(kv => kv.Value.Pid == 500)) _f.Threads[kv.Key] = kv.Value;
+        StartGame();
+        Seconds(7);
+        Assert.Equal(AutoState.Active, _c.State);   // the next game is picked up without a click
     }
 
     [Fact]
@@ -281,20 +301,16 @@ public class AutoTests : IDisposable
     }
 
     [Fact]
-    public void FrameRegressionRevertsAndNoFramesIsReported()
+    public void WorseFrameTimeNeverRevertsAndNoFramesIsReported()
     {
         _c.Click();
         StartGame();
         Seconds(7);
         Assert.Equal(AutoState.Active, _c.State);
-        _fr.FrameMs = 5;   // p99 +25 %
-        Seconds(11);
-        Assert.Equal(AutoState.Active, _c.State);   // one window is not a verdict (the A/B check: WatchdogAbTests)
-        for (int i = 0; i < 60 && !_c.Status.Contains("checking"); i++) Seconds(1);   // three bad windows
-        Assert.Contains("checking", _c.Status);   // without the changes it is better: reverted
-        _fr.FrameMs = 4;
-        Seconds(14);
-        Assert.Equal(AutoState.Idle, _c.State);
+        _fr.FrameMs = 8;   // p99 doubled: there is no frame-time watchdog, Auto keeps its changes
+        Seconds(90);
+        Assert.Equal(AutoState.Active, _c.State);
+        Assert.Contains("boost on", _c.Status);
         _fr.Available = false;
         Assert.Contains("Frame time is not measured", _c.Report());
     }
@@ -388,117 +404,5 @@ public class AutoLogicTests
         Assert.All(p2, c => Assert.Equal(prev[c.Row.Tid], c.LP));
         Assert.Equal(0.2, AutoLogic.CompositionChange(new uint[] { 1, 2, 3, 4, 5 }, new uint[] { 1, 2, 3, 4 }), 3);
         Assert.Equal(0.0, AutoLogic.CompositionChange(new uint[] { 1, 2 }, new uint[] { 2, 1 }));
-    }
-}
-
-[Collection("static-hooks")]
-public class WatchdogAbTests : IDisposable
-{
-    DateTime _now = new(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
-    readonly FakeNative _f = FakeNative.Cs2();
-    readonly FakeProbe _p = new();
-    readonly FakeFrames _fr = new();
-    readonly Engine _e;
-    readonly AutoController _c;
-
-    public WatchdogAbTests()
-    {
-        Topo.LiveHook = Synth.X7800X3D;
-        GameMask.IrqHook = () => new();
-        Reservation.Reg = new FakeReserved();
-        Settings.Backend = new MemorySettingsBackend();
-        Settings.ResetReads();
-        _f.Procs[800] = new FakeNative.P { Name = "Discord.exe", Created = 5 };
-        _e = new Engine(_f) { Now = () => _now, Sleep = ms => Advance(ms) };
-        _f.Procs[1] = new FakeNative.P { Name = "DomainScheduler.exe", Created = 1 };
-        _c = new AutoController(_e, _p, _fr, () => _now) { SaveSession = _ => { } };
-        _c.Click();
-        _p.Windows.Add(500);
-        _p.Graphics.Add(500);
-        _p.Cpu[500] = (_f.Procs[500].Created, 0);
-        _p.Fg = 500;
-        Seconds(7);
-        Assert.Equal(AutoState.Active, _c.State);
-    }
-
-    public void Dispose()
-    {
-        Topo.LiveHook = null;
-        GameMask.IrqHook = null;
-        Reservation.Reg = new WinReservedRegistry();
-        Settings.Backend = new RegistrySettingsBackend();
-    }
-
-    void Advance(int ms)
-    {
-        _now = _now.AddMilliseconds(ms);
-        _f.Run(new() { [100] = 4_000_000_000, [101] = 2_000_000_000, [102] = 300_000_000, [103] = 900_000_000, [104] = 800_000_000, [105] = 1_200_000_000 }, ms / 1000.0);
-        foreach (var pid in _p.Cpu.Keys.ToList())
-        {
-            var (c, cpu) = _p.Cpu[pid];
-            _p.Cpu[pid] = (c, cpu + (long)(ms * 10_000 * 0.8));
-        }
-    }
-
-    void Seconds(int n)
-    {
-        for (int i = 0; i < n; i++)
-        {
-            Advance(1000);
-            _c.Tick();
-        }
-    }
-
-    /// <summary>The engine holds a baseline for the game only while something of it is changed.</summary>
-    bool Changed => _e.Export().Procs.Any(p => p.Pid == 500) || _e.Export().Threads.Any(t => t.Pid == 500);
-
-    void UntilChecking()
-    {
-        for (int i = 0; i < 60 && !_c.Status.Contains("checking"); i++) Seconds(1);
-        Assert.Contains("checking", _c.Status);
-    }
-
-    [Fact]
-    public void HeavyMomentsRightAfterApplyAndSingleBadWindowsDoNotRevert()
-    {
-        _fr.FrameMs = 8;          // the 20 s after the apply: loading, migration
-        Seconds(15);
-        _fr.FrameMs = 4;
-        Seconds(10);
-        for (int i = 0; i < 4; i++)  // one bad 10 s window out of two: never 3 in a row
-        {
-            _fr.FrameMs = 6; Seconds(10);
-            _fr.FrameMs = 4; Seconds(10);
-        }
-        Assert.Equal(AutoState.Active, _c.State);
-        Assert.DoesNotContain("checking", _c.Status);
-    }
-
-    [Fact]
-    public void SceneGotHeavierIsNotBlamedOnTheTool()
-    {
-        Seconds(10);
-        _fr.FrameMs = 6;          // a heavier scene: +50 %
-        UntilChecking();
-        Assert.False(Changed);    // the changes are off during the check
-        Seconds(14);              // without the changes it is just as heavy
-        Assert.Equal(AutoState.Active, _c.State);
-        Assert.Contains("boost on", _c.Status);
-        Assert.True(Changed);
-        Seconds(40);              // the new baseline is the heavier scene: no second check
-        Assert.Contains("boost on", _c.Status);
-    }
-
-    [Fact]
-    public void RealRegressionIsRevertedAfterTheAbCheck()
-    {
-        Seconds(10);
-        _fr.FrameMs = 6;
-        UntilChecking();
-        _fr.FrameMs = 4;          // without the changes it is better: the changes were the cause
-        Seconds(14);
-        Assert.Equal(AutoState.Idle, _c.State);
-        Assert.False(Changed);
-        Assert.Contains("with the changes", _c.Report());
     }
 }

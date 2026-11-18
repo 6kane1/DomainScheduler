@@ -104,7 +104,7 @@ Settings that apply to every CPU:
 
 ## Project status
 
-Version 1.4.0. The engine, masks, Auto, presets and the roadmap features are covered by 90
+Version 1.3.0. The engine, masks, Auto, presets and the roadmap features are covered by 90
 automated tests that run against a simulated Windows. Hardware coverage is narrow: please report
 your CPU, Windows build and before/after numbers in the issues.
 
@@ -126,3 +126,7 @@ Third-party packages: Microsoft.Diagnostics.Tracing.TraceEvent, System.Managemen
 - Presets, profiles, log, session file: `%LOCALAPPDATA%\DomainScheduler`
 - Autostart: Task Scheduler task `DomainScheduler`
 - **Settings → Factory reset** removes all of the above.
+
+## License
+**Domain OS License** — all rights reserved (see [LICENSE](LICENSE)). You may read the code and use the official releases free of charge on your own PCs. Copying, re-uploading, publishing changed versions or builds based on this code, removing the author notices and selling are not allowed without the author's written permission. Versions published before 18 November 2026 under MIT stay MIT for the copies obtained then.
+Windows is a trademark of Microsoft; this project ships no part of Windows.

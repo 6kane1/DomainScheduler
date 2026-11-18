@@ -8,8 +8,8 @@ namespace DomainScheduler;
 public static class Flags
 {
     public const string Sub = "Flags";
-    public const string Core = "core", DevicesWrite = "devices-write", SoftClose = "softclose", EtwIrq = "etwirq", TimerRes = "timerres";
-    public static readonly string[] FlagKeys = { Core, DevicesWrite, SoftClose, EtwIrq, TimerRes };
+    public const string Core = "core", DevicesWrite = "devices-write", SoftClose = "softclose", EtwIrq = "etwirq", TimerRes = "timerres", GpuOc = "gpu-oc";
+    public static readonly string[] FlagKeys = { Core, DevicesWrite, SoftClose, EtwIrq, TimerRes, GpuOc };
     static readonly HashSet<string> _warned = new();
 
     public static bool Open(string key)

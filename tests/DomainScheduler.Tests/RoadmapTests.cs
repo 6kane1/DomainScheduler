@@ -1,4 +1,4 @@
-using Xunit;
+﻿using Xunit;
 
 namespace DomainScheduler.Tests;
 
@@ -23,7 +23,7 @@ public class RoadmapTests : IDisposable
         Reservation.Reg = new FakeReserved();
         Settings.Backend = _settings;
         AppLog.Clear();
-        _f.Procs[800] = new FakeNative.P { Name = "Discord.exe", Created = 5 };
+        _f.Procs[800] = new FakeNative.P { Name = "GCC.exe", Created = 5 };
         _f.Procs[801] = new FakeNative.P { Name = "notepad.exe", Created = 6 };
         _f.Procs[802] = new FakeNative.P { Name = "lsass.exe", Created = 7 };
         _f.Procs[803] = new FakeNative.P { Name = "dwm.exe", Created = 8 };
@@ -85,7 +85,7 @@ public class RoadmapTests : IDisposable
         Assert.Equal(0, _c.StandaloneBackground(true, 0) - _e.BackgroundCount);
         Assert.Equal(16384u, _f.Procs[800].Cls);               // lowered while the watched game runs
         Assert.Equal(16384u, _f.Procs[801].Cls);
-        Assert.Equal(0u, _f.Procs[800].Io);
+        Assert.Equal(1u, _f.Procs[800].Io);
         Assert.Equal(32u, _f.Procs[500].Cls);                  // the game is not background
         Assert.Equal(32u, _f.Procs[802].Cls);                  // denylist
         Assert.Equal(32u, _f.Procs[803].Cls);                  // system
@@ -150,11 +150,11 @@ public class RoadmapTests : IDisposable
     // ---- 22.4 ----------------------------------------------------------------------------------
 
     [Fact]
-    public void ThreadCpuSetsHaveABaselineARevertAndDegradeToIdealOnly()
+    public void ThreadCpuSetsOfThePinHeatPolicyHaveABaselineARevertAndDegradeToIdealOnly()
     {
         _f.Threads[100].Sets = new uint[] { 7 };                // what the thread had before
         _f.Threads[101].RefuseSets = true;                      // Windows refuses this one
-        _c.ThreadSets = true;
+        _c.Heat = _ => ("pin", "pin");                   // the game's own preset asks for hard limits
         GameToActive();
         var pins = _e.ThreadPins;
         Assert.Contains("500:100", pins.Keys);
@@ -183,7 +183,7 @@ public class RoadmapTests : IDisposable
     }
 
     [Fact]
-    public void WithoutTheSwitchNoThreadCpuSetIsWritten()
+    public void WithoutThePinHeatPolicyNoThreadCpuSetIsWritten()
     {
         GameToActive();
         Assert.All(_f.Threads.Values, t => Assert.Equal(0, t.SetsWrites));
@@ -254,7 +254,7 @@ public class RoadmapTests : IDisposable
             new() { Row = new ThreadRow { Tid = 103, Born = 1030 }, Role = ThreadRole.Worker, LP = 6 },
         };
         var reference = AutoLogic.BuildAutoPreset("cs2.exe", plan, true);
-        var none = AutoLogic.BuildAutoPreset("cs2.exe", plan, true, false, "none", "none");
+        var none = AutoLogic.BuildAutoPreset("cs2.exe", plan, true, "none", "none");
         Assert.True(Store.Same(reference, none));
         new Engine(fa).ApplyAuto(500, reference, 0xFFFF, new ApplyOptions { DoMask = true, DoThreads = true });
         new Engine(fb).ApplyAuto(500, none, 0xFFFF, new ApplyOptions { DoMask = true, DoThreads = true });
@@ -262,11 +262,10 @@ public class RoadmapTests : IDisposable
         Assert.All(fb.Threads.Values, t => Assert.Equal(0, t.SetsWrites));
 
         // pin / ideal: the first slot gets the CPU Set too, the others the ideal processor only.
-        var hot = AutoLogic.BuildAutoPreset("cs2.exe", plan, true, false, "pin", "ideal");
+        var hot = AutoLogic.BuildAutoPreset("cs2.exe", plan, true, "pin", "ideal");
         Assert.Equal(new[] { true, false, false }, hot.Threads.Select(t => t.Pin));
-        // ideal overrides the global switch for its slots; without pins (low confidence) nothing is hard.
-        Assert.Equal(new[] { true, false, false }, AutoLogic.BuildAutoPreset("cs2.exe", plan, true, true, "none", "ideal").Threads.Select(t => t.Pin));
-        Assert.All(AutoLogic.BuildAutoPreset("cs2.exe", plan, false, true, "pin", "pin").Threads, t => Assert.False(t.Pin));
+        // Without pins (low confidence) nothing is hard.
+        Assert.All(AutoLogic.BuildAutoPreset("cs2.exe", plan, false, "pin", "pin").Threads, t => Assert.False(t.Pin));
 
         // A preset of the user's: the hottest matched thread is pinned, the next ones get an ideal processor.
         var f = FakeNative.Cs2();
@@ -340,8 +339,6 @@ public class RoadmapTests : IDisposable
         var registryOnly = GameMask.ForRule(x, 0xFFFF, GameMask.CoreMode);
 
         var irq = new EtwIrq { Now = () => _now };
-        Assert.False(irq.Start());                              // the flag is closed: refused, the registry is used alone
-        Assert.True(Logged(AppLog.Sev.Warn, "etwirq"));
         irq.MarkAvailableForTests();
         for (int s = 0; s < 10; s++)
         {
@@ -361,6 +358,83 @@ public class RoadmapTests : IDisposable
         Assert.Equal(registryOnly.Final & ~0x300UL, on.Final);  // the whole core of processor 8 is stepped around
         _now = _now.AddSeconds(30);                             // the noise is over
         Assert.Equal(registryOnly.Final, GameMask.ForRule(x, 0xFFFF, GameMask.CoreMode).Final);
+    }
+
+    [Fact]
+    public void BusyInterruptCoresUseHysteresisAndHold()
+    {
+        var x = Synth.X7800X3D();
+        var irq = new EtwIrq { Now = () => _now };
+        irq.MarkAvailableForTests();
+        ulong? got = null;
+        for (int s = 0; s < 40; s++)
+        {
+            irq.Add(12, 100);                                   // 10% of processor 12 (core 6)
+            irq.Add(14, 100);                                   // 10% of processor 14 (core 7)
+            irq.Add(2, 10);                                     // 1% of processor 2: quiet
+            got = irq.BusyCoresIfReady(x);
+            if (s < 25) Assert.Null(got);                       // no verdict before a full window and the hold
+            _now = _now.AddSeconds(1);
+        }
+        Assert.Equal(0xF000UL, got);                            // both cores, both SMT threads
+        for (int s = 0; s < 40; s++)                            // 3%: under "enter", above "leave": stays busy
+        {
+            irq.Add(12, 30); irq.Add(14, 30);
+            Assert.Equal(0xF000UL, irq.BusyCoresIfReady(x));
+            _now = _now.AddSeconds(1);
+        }
+        for (int s = 0; s < 45; s++) { irq.Add(12, 5); irq.BusyCoresIfReady(x); _now = _now.AddSeconds(1); }
+        Assert.Equal(0UL, irq.BusyCoresIfReady(x));             // quiet for longer than window + hold
+    }
+
+    [Fact]
+    public void GraphicsDriverCoresAreAvoidedFromTheThirdSecond()
+    {
+        var x = Synth.X7800X3D();
+        var irq = new EtwIrq { Now = () => _now };
+        irq.MarkAvailableForTests();
+        irq.SetDrivers(new() { (0x1000, "nvlddmkm.sys"), (0x9000000, "storport.sys") });
+        ulong? got = null;
+        for (int s = 0; s < 6; s++)
+        {
+            irq.Add(4, 6, 0x1500);                              // the graphics driver: 0.6% of processor 4 (core 2)
+            irq.Add(9, 6, 0x9000100);                           // another driver, same share: not a graphics core
+            got = irq.BusyCoresIfReady(x);
+            if (s < EtwIrq.GpuSeconds) Assert.Null(got);        // nothing known before 3 s of trace
+            _now = _now.AddSeconds(1);
+        }
+        Assert.Equal(0x30UL, got);                              // the whole core 2 (processors 4 and 5), long before the busy-core rule
+        for (int s = 0; s < 5; s++) { irq.Add(4, 0.5, 0x1500); got = irq.BusyCoresIfReady(x); _now = _now.AddSeconds(1); }
+        Assert.Equal(0UL, irq.GpuCores(x));                     // the driver went quiet there (0.05%): the core is free again
+    }
+
+    [Fact]
+    public void LiveMaskStepsAroundWholeBusyCoresButNeverMoreThanHalf()
+    {
+        var x = Synth.X7800X3D();
+        var live = GameMask.ForLive(x, 0xFFFF, 0xF000);
+        Assert.Equal(0x0FFFUL, live.Final);
+        Assert.Equal(0xF000UL, live.IrqDrop);
+        var tooMuch = GameMask.ForLive(x, 0xFFFF, 0xFFF0);
+        Assert.True(tooMuch.IrqIgnored);
+        Assert.Equal(0xFFFFUL, tooMuch.Final);
+    }
+
+    [Fact]
+    public void AutoUsesLiveCoresWhenReadyAndThePinsBefore()
+    {
+        var x = Synth.X7800X3D();
+        GameMask.IrqHook = () => new() { new("GPU", 0x5000), new("Mouse", 0x4) };
+        try
+        {
+            GameMask.BusyHook = null;
+            var pins = AutoLogic.BuildMask(x, 0);
+            GameMask.BusyHook = _ => null;                      // live on, not ready yet: same as the pins
+            Assert.Equal(pins.Mask, AutoLogic.BuildMask(x, 0).Mask);
+            GameMask.BusyHook = _ => 0xF000UL;                  // ready: whole cores 6 and 7 out, the pins no longer used
+            Assert.Equal(0x0FFFUL, AutoLogic.BuildMask(x, 0).Mask);
+        }
+        finally { GameMask.BusyHook = null; }
     }
 
     // ---- 22.11 ---------------------------------------------------------------------------------
@@ -409,7 +483,7 @@ public class RoadmapTests : IDisposable
     [Fact]
     public void ClosedFlagsRefuseTheirActionsAndOnlyCoreIsOpenByDefault()
     {
-        Assert.Equal(new[] { "core", "devices-write", "softclose", "etwirq", "timerres" }, Flags.FlagKeys);
+        Assert.Equal(new[] { "core", "devices-write", "softclose", "etwirq", "timerres", "gpu-oc" }, Flags.FlagKeys);
         Assert.True(Flags.Open(Flags.Core));
         foreach (var k in Flags.FlagKeys.Skip(1)) Assert.False(Flags.Open(k));
         Assert.False(Flags.Open("no-such-flag"));
@@ -437,7 +511,6 @@ public class RoadmapTests : IDisposable
     {
         Flags.Set(Flags.TimerRes, true);
         Flags.Set(Flags.SoftClose, true);
-        _c.ThreadSets = true;
         _c.TimerRes = true;
         _c.Heat = _ => ("pin", "pin");
         _c.Soft = new SoftClose { On = true, CloseWindow = _ => true, List = new(StringComparer.OrdinalIgnoreCase) { "lsass.exe", "notepad.exe" } };

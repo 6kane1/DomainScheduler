@@ -29,15 +29,23 @@ public static class AppLog
     /// <summary>Grows with every entry (the log panel redraws only when it changed).</summary>
     public static long Version => Interlocked.Read(ref _version);
 
+    /// <summary>Raised for every error entry (outside the lock): the app shows it in a window, there is no on-screen journal.</summary>
+    public static event Action<Entry> ErrorAdded;
+
     public static void Add(string msg, Sev sev = Sev.Info)
     {
         if (string.IsNullOrEmpty(msg)) return;
         Interlocked.Increment(ref _version);
+        Entry e = new Entry(Now(), sev, msg);
         lock (_gate)
         {
-            _ring[_next] = new Entry(Now(), sev, msg);
+            _ring[_next] = e;
             _next = (_next + 1) % Capacity;
             if (_count < Capacity) _count++;
+        }
+        if (sev == Sev.Error)
+        {
+            try { ErrorAdded?.Invoke(e); } catch (Exception) { }
         }
     }
 
@@ -77,5 +85,24 @@ public static class AppLog
             }
         }
         catch (Exception) { }
+    }
+
+    /// <summary>Type, message and inner exceptions (an AggregateException is unpacked) plus the first stack frame of
+    /// this program, so an error with an empty message still says what failed and where.</summary>
+    public static string Describe(Exception e)
+    {
+        if (e == null) return "";
+        var parts = new List<string>();
+        var list = e is AggregateException ag ? ag.Flatten().InnerExceptions.ToList() : new List<Exception> { e };
+        foreach (var x in list.Take(3))
+        {
+            var cur = x;
+            var chain = new List<string>();
+            for (int d = 0; cur != null && d < 3; d++, cur = cur.InnerException)
+                chain.Add(cur.GetType().Name + (string.IsNullOrWhiteSpace(cur.Message) ? "" : ": " + cur.Message));
+            string at = (x.StackTrace ?? "").Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Contains("DomainScheduler")) ?? "";
+            parts.Add(string.Join(" ← ", chain) + (at.Length > 0 ? " [" + at + "]" : ""));
+        }
+        return string.Join(" | ", parts);
     }
 }
