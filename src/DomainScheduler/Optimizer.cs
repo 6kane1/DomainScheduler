@@ -102,6 +102,7 @@ internal sealed class Optimizer : IDisposable
 
 	private void Run()
 	{
+		SelfThreads.Register(L.N("worker"));
 		foreach (Action item in _q.GetConsumingEnumerable())
 		{
 			try

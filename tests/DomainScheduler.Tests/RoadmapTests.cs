@@ -481,12 +481,14 @@ public class RoadmapTests : IDisposable
     // ---- 22.12 ---------------------------------------------------------------------------------
 
     [Fact]
-    public void ClosedFlagsRefuseTheirActionsAndOnlyCoreIsOpenByDefault()
+    public void ClosedFlagsRefuseTheirActionsAndOnlyCoreDevicesAndGpuAreOpenByDefault()
     {
         Assert.Equal(new[] { "core", "devices-write", "softclose", "etwirq", "timerres", "gpu-oc" }, Flags.FlagKeys);
-        Assert.True(Flags.Open(Flags.Core));
-        foreach (var k in Flags.FlagKeys.Skip(1)) Assert.False(Flags.Open(k));
+        // 1.16.0: core, devices-write and gpu-oc open by default (owner's defaults); the rest closed.
+        foreach (var k in new[] { Flags.Core, Flags.DevicesWrite, Flags.GpuOc }) Assert.True(Flags.Open(k));
+        foreach (var k in new[] { Flags.SoftClose, Flags.EtwIrq, Flags.TimerRes }) Assert.False(Flags.Open(k));
         Assert.False(Flags.Open("no-such-flag"));
+        Flags.Set(Flags.DevicesWrite, false);      // the refusal below needs the flag closed by the user
 
         int calls = Devices.WriteCalls;
         string err = Devices.Write(new PciDevice { Name = "NIC", Pdo = @"PCI\VEN_1" }, new IrqConfig { Assign = 4 });

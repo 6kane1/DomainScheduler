@@ -25,6 +25,9 @@ internal sealed class Hub
 
 	public readonly SoftClose Soft = new SoftClose();
 
+	/// <summary>1.16.0 Test 1.10: caps heavy background programs during a game (see BurstGuard).</summary>
+	public readonly BurstGuard Burst = new BurstGuard();
+
 	public readonly EtwIrq Irq = new EtwIrq();
 
 	public volatile bool BgOn = true;
@@ -79,6 +82,9 @@ internal sealed class Hub
 	private HashSet<string> _watch = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
 	public double SelfCpu { get; private set; }
+
+	/// <summary>Own load per named thread over the last minute (share of one processor), 1.16.0 Test 1.</summary>
+	public Dictionary<string, double> SelfByThread { get; private set; } = new Dictionary<string, double>();
 
 	public double UiMs { get; private set; }
 
@@ -154,6 +160,7 @@ internal sealed class Hub
 				if (_selfAt != default(DateTime))
 				{
 					SelfCpu = (totalProcessorTime - _selfCpu).TotalSeconds / Math.Max(1.0, (utcNow - _selfAt).TotalSeconds);
+					SelfByThread = SelfThreads.Shares(SelfThreads.Now(), Math.Max(1.0, (utcNow - _selfAt).TotalSeconds));
 					UiMs = ((_uiCount > 0) ? (_uiMsSum / (double)_uiCount) : 0.0);
 					TickMs = ((_tickCount > 0) ? (_tickMsSum / (double)_tickCount) : 0.0);
 					UiPerMinute = _uiCount;
@@ -161,6 +168,10 @@ internal sealed class Hub
 					UiSkippedPerMinute = _uiSkipped;
 					ChartPerMinute = _chartCount;
 					ChartMs = ((_chartCount > 0) ? (_chartMsSum / (double)_chartCount) : 0.0);
+				}
+				if (_selfAt == default(DateTime))
+				{
+					SelfThreads.Shares(SelfThreads.Now(), 0.0);
 				}
 				_selfCpu = totalProcessorTime;
 				_selfAt = utcNow;
@@ -308,6 +319,7 @@ internal sealed class Hub
 			g.AtStart = "";
 			g.Skipped = d.Profile.Name;
 			g.SkippedUtc = DateTime.UtcNow;
+			g.RecordCrash(d.Profile, appliedUtc);
 			Settings.Set("GpuOcAppliedUtc", "");
 			try
 			{
@@ -334,11 +346,23 @@ internal sealed class Hub
 		}
 	}
 
+	/// <summary>"; by thread: window 0.40%, worker 0.20%, …, rest 0.10%" (rest = threads that did not register: .NET, timers).</summary>
+	private string ThreadsPart()
+	{
+		Dictionary<string, double> t = SelfByThread;
+		if (t == null || t.Count == 0)
+		{
+			return "";
+		}
+		double rest = Math.Max(0.0, SelfCpu - t.Values.Sum());
+		return "; " + L.T("by thread") + ": " + string.Join(", ", t.OrderByDescending((KeyValuePair<string, double> kv) => kv.Value).Select((KeyValuePair<string, double> kv) => L.F("{0} {1:0.00}%", L.T(kv.Key), kv.Value * 100.0))) + ", " + L.F("{0} {1:0.00}%", L.T("rest"), rest * 100.0);
+	}
+
 	public string SelfLine()
 	{
 		if (UiPerMinute + UiSkippedPerMinute != 0 || TickMs != 0.0)
 		{
-			return L.F("Own load (last minute): {0:0.00}% of one core; background tick {1:0.0} ms; window drawn {2} times, {3:0.0} ms each; skipped while hidden {4}; GPU not used (software drawing)", SelfCpu * 100.0, TickMs, UiPerMinute, UiMs, UiSkippedPerMinute) + ((ChartPerMinute > 0) ? ("; " + L.F("home chart updated {0} times, {1:0.00} ms each", ChartPerMinute, ChartMs)) : "") + ((TickMs > 0.0) ? ("; tick parts: " + string.Join(", ", PartNames.Select((string n, int i) => L.F("{0} {1:0.0} ms", n, _partAvg[i])))) : "");
+			return L.F("Own load (last minute): {0:0.00}% of one core; background tick {1:0.0} ms; window drawn {2} times, {3:0.0} ms each; skipped while hidden {4}; GPU not used (software drawing)", SelfCpu * 100.0, TickMs, UiPerMinute, UiMs, UiSkippedPerMinute) + ((ChartPerMinute > 0) ? ("; " + L.F("home chart updated {0} times, {1:0.00} ms each", ChartPerMinute, ChartMs)) : "") + ((TickMs > 0.0) ? ("; tick parts: " + string.Join(", ", PartNames.Select((string n, int i) => L.F("{0} {1:0.0} ms", n, _partAvg[i])))) : "") + ThreadsPart();
 		}
 		return L.T("Own load: measured after the first minute");
 	}
@@ -446,6 +470,13 @@ internal sealed class Hub
 		Soft.On = false;
 		Soft.List = new HashSet<string>(Settings.WatchList(Settings.Get("ClosableList")), StringComparer.OrdinalIgnoreCase);
 		Auto.Soft = Soft;
+		Burst.On = Settings.GetBool("BurstGuard", fallback: true);
+		Burst.Soft = Settings.GetBool("BurstGuardSoft", fallback: true);
+		if (Burst.StatePath == null)
+		{
+			try { Burst.StatePath = System.IO.Path.Combine(Store.Dir, "burstguard.json"); Burst.RecoverAfterCrash(); } catch (Exception) { }
+		}
+		Auto.Burst = Burst;
 		ReapplyTicks = Math.Clamp((int.TryParse(Settings.Get("ReapplyMs"), out var result) ? result : 10000) / 1000, 1, 1000);
 	}
 
@@ -461,16 +492,13 @@ internal sealed class Hub
 		if (!Auto.On || Auto.GamePid == 0) return L.T("Auto-tune: turn Auto on and start the game first, then press the button again");
 		if (Frames == null || !Frames.Available) return L.T("Auto-tune needs the frame-time measurement, which is not available here");
 		bool live = LiveIrqOn;
+		// 1.16.0 Test 1.9: the role plan is gone, so auto-tune compares only the interrupt-core rule (needs live DPC/ISR).
+		if (!live) return L.T("Auto-tune compares the interrupt-core rule: turn on \"Watch driver latency\" in Settings first");
 		var variants = new List<TunerVariant>
 		{
-			new TunerVariant(L.T("Roles"), false, false),
 			new TunerVariant(L.T("Dynamic Top-5"), true, false),
+			new TunerVariant(L.T("Dynamic Top-5 + interrupt cores avoided"), true, true),
 		};
-		if (live)
-		{
-			variants.Add(new TunerVariant(L.T("Roles + interrupt cores avoided"), false, true));
-			variants.Add(new TunerVariant(L.T("Dynamic Top-5 + interrupt cores avoided"), true, true));
-		}
 		bool curLive = live && LiveIrqMask;
 		int baseline = variants.FindIndex(v => v.Top5 == Auto.Top5Mode && v.LiveMask == curLive);
 		if (baseline < 0) baseline = 0;

@@ -28,14 +28,15 @@ public class IrqLayoutTests
     }
 
     [Fact]
-    public void Without_free_cores_the_keyboard_shares_the_mouse_core_through_its_sibling()
+    public void Six_cores_or_fewer_give_no_device_a_core_of_its_own()
     {
-        // 3 cores for 4 slots: too few to avoid core 0, so the mouse takes it; no core is left for the keyboard.
-        var t = Synth.Symmetric(3, true, 3, new[] { 32 * Synth.MB }, "3 cores");
-        var m = Plan(t, null, S(IrqRole.Mouse), S(IrqRole.Gpu), S(IrqRole.Keyboard));
-        Assert.Equal(0x1UL, m["Mouse"]);
-        Assert.Equal(0x14UL, m["Gpu"]);             // LP2 + LP4
-        Assert.Equal(0x2UL, m["Keyboard"]);         // LP1 = the mouse core's second thread
+        // 1.16.0-test1.7: 6 cores or fewer, one CCD, no E-cores: every core stays with the game (8+ keep the layout).
+        foreach (var t in new[] { Synth.I12400(), Synth.Six(), Synth.Symmetric(4, true, 4, new[] { 8 * Synth.MB }, "4 cores") })
+        {
+            var slots = IrqLayout.Plan(t, new[] { S(IrqRole.Mouse), S(IrqRole.Gpu), S(IrqRole.Net), S(IrqRole.Keyboard) }, null);
+            Assert.All(slots, x => Assert.Equal(0UL, x.Mask));
+            Assert.All(slots, x => Assert.Contains("No core of its own", x.Why));
+        }
     }
 
     [Fact]

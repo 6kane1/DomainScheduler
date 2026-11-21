@@ -21,6 +21,14 @@ internal sealed class SettingsPage : Page
 	public override FrameworkElement Build()
 	{
 		StackPanel stackPanel = new StackPanel();
+		// 1.16.0 Test 1.9: updates and the tester key have their own page; the simple layout reaches it from here.
+		if (S.Simple)
+		{
+			Button toUpd = Ui.Btn(L.T("Updates and testing"), () => S.ShowPage<UpdatePage>(), 220.0);
+			toUpd.HorizontalAlignment = HorizontalAlignment.Left;
+			toUpd.Margin = new Thickness(0.0, 0.0, 0.0, 8.0);
+			stackPanel.Children.Add(toUpd);
+		}
 		CheckRow checkRow = new CheckRow(L.T("Built-in system presets"), L.T("Thread priorities for Windows and common background programs (the bundled list)."), Settings.GetBool("SysPresets"));
 		checkRow.Changed += delegate(bool v)
 		{
@@ -90,16 +98,14 @@ internal sealed class SettingsPage : Page
 		});
 		// 1.14.0: the home screen's frame-time line is drawn 4 times a second while a game runs; weak PCs can switch it off.
 		string chartsLabel = L.T("Live charts on the home screen");
-		CheckRow charts = new CheckRow(chartsLabel, L.T("On by default. The frame-time line is redrawn 4 times a second, only while the window is open and a game runs. Off: the numbers stay, the line is not drawn."), HomeView.LiveCharts);
+		CheckRow charts = new CheckRow(chartsLabel, L.T("Drawn only while the window is open and a game runs. Off: the numbers stay, without the line."), HomeView.LiveCharts);
 		charts.Changed += delegate(bool v)
 		{
 			Settings.SetBool("HomeCharts", v);
 			HomeView.LiveCharts = v;
 			S.Did(v ? L.F("{0}: on", chartsLabel) : L.F("{0}: off", chartsLabel));
 		};
-		CheckRow upd = Toggle("CheckUpdates", L.T("Check for updates"), L.T("Once a day Toolbox reads a small file from the Domain OS site (nothing about this PC is sent). A new version is shown on the home page; nothing installs until you press Update."), null, fallback: true);
-		stackPanel.Children.Add(Ui.Card(Ui.Col(Ui.Head(L.T("General")), checkRow, auto, charts, upd, Ui.Row(Ui.Text(L.T("Re-apply presets every") + "  "), comboBox), Ui.Row(Ui.Text(L.T("Language") + "  "), comboBox2))));
-		stackPanel.Children.Add(Ui.Card(TesterCard()));
+		stackPanel.Children.Add(Ui.Card(Ui.Col(Ui.Head(L.T("General")), checkRow, auto, charts, Ui.Row(Ui.Text(L.T("Re-apply presets every") + "  "), comboBox), Ui.Row(Ui.Text(L.T("Language") + "  "), comboBox2))));
 		stackPanel.Children.Add(Ui.Card(Functions()));
 		stackPanel.Children.Add(Ui.Card(FlagCard()));
 		StackPanel stackPanel2 = Ui.Col(Ui.Head(L.T("Watchlist")), Ui.Note(L.T("Only these programs are changed (plus the built-in presets and Auto's background). Add programs on the Processes page.")));
@@ -128,7 +134,7 @@ internal sealed class SettingsPage : Page
 			stackPanel2.Children.Add(Ui.Note(L.T("The watchlist is empty: Auto will not pick a game.")));
 		}
 		stackPanel.Children.Add(Ui.Card(stackPanel2));
-		stackPanel.Children.Add(Ui.Card(Ui.Col(Ui.Head(L.T("Factory reset")), Ui.Note(L.T("Puts everything back, removes the settings, presets, the autostart task and the data folder, then closes the program.")), Ui.Row(Ui.ConfirmBtn(L.T("Factory reset"), delegate
+		stackPanel.Children.Add(Ui.Card(Ui.Col(Ui.Head(L.T("Factory reset")), Ui.Note(L.T("Puts everything back, deletes the settings, presets, autostart and data, then closes Toolbox.")), Ui.Row(Ui.ConfirmBtn(L.T("Factory reset"), delegate
 		{
 			H.Opt.RunNow(delegate
 			{
@@ -159,7 +165,7 @@ internal sealed class SettingsPage : Page
 	private UIElement Functions()
 	{
 		StackPanel stackPanel = Ui.Col(Ui.Head(L.T("Functions")));
-		stackPanel.Children.Add(Ui.Note(L.T("Auto-tune: with Auto on and the game running, the program tries the thread modes and the interrupt-core rule for about 8 minutes while you play, measures the frame time of each, and keeps a combination only if it was better in every round. If the game ends or Auto is turned off, the previous settings stay.")));
+		stackPanel.Children.Add(Ui.Note(L.T("Auto-tune: while you play (about 8 minutes) Toolbox tries the game with and without the interrupt cores and keeps the rule only if it was better every round.")));
 		stackPanel.Children.Add(Ui.Row(Ui.Btn(L.T("Start auto-tune"), delegate
 		{
 			H.Opt.Queue(delegate
@@ -174,7 +180,7 @@ internal sealed class SettingsPage : Page
 				H.TunerStop(L.T("stopped by the user"));
 			}, skipIfBusy: false, reports: true);
 		}, 170)));
-		stackPanel.Children.Add(Toggle("BgOn", L.T("Lower background programs while a watched game runs"), L.T("Below-normal priority, low I/O, low memory priority, EcoQoS and the background cores. Audio, voice, streaming and VR programs, launchers and Explorer are never changed. Auto always does this. Turning it off puts everything back."), delegate(bool v)
+		stackPanel.Children.Add(Toggle("BgOn", L.T("Lower background programs while a watched game runs"), L.T("Lower priority and power-saving mode for background programs. Audio, voice, streaming, VR, launchers and Explorer are never touched. Off puts everything back."), delegate(bool v)
 		{
 			if (!v)
 			{
@@ -184,7 +190,7 @@ internal sealed class SettingsPage : Page
 				}, skipIfBusy: false, reports: true);
 			}
 		}));
-		stackPanel.Children.Add(Toggle("TimerGuard", L.T("Ignore timer requests of background programs while a game runs"), L.T("On by default. Programs and services in the background (RGB, monitoring, launchers) often ask Windows for a 0.5–1 ms timer, which makes every core wake up to 2000 times a second. Their requests are ignored while the game runs; the game's own request stays. System, audio, voice, streaming programs and browsers are never changed. Turning it off puts everything back."), delegate(bool v)
+		stackPanel.Children.Add(Toggle("TimerGuard", L.T("Ignore timer requests of background programs while a game runs"), L.T("Background programs (RGB, monitoring, launchers) ask for a fast timer that wakes every core up to 2000 times a second. While the game runs, their requests are ignored; the game keeps its own. Off puts everything back."), delegate(bool v)
 		{
 			if (!v)
 			{
@@ -194,76 +200,17 @@ internal sealed class SettingsPage : Page
 				}, skipIfBusy: false, reports: true);
 			}
 		}, fallback: true));
-		stackPanel.Children.Add(Toggle("LiveIrq", L.T("Watch driver latency while a game runs (live DPC/ISR)"), L.T("On by default. While a game is handled, Windows' kernel trace measures how long every driver's DPCs and interrupts take. Drivers that took 1 ms or longer are written to the activity log once a minute. Nothing is changed; the trace stops when the game ends."), null, fallback: true));
-		stackPanel.Children.Add(Toggle("LiveIrqMask", L.T("Keep the game off cores busy with interrupts"), L.T("On by default, needs the line above. A core that spends more than 4% of its time on interrupts (for 20 s in a row) is left out of the game's cores, both of its threads; it comes back when it stays under 2%. Before the first measurement the pinned devices from the registry are used, as before."), null, fallback: true));
+		// 1.16.0: the burst guard (on, soft mode by default).
+		stackPanel.Children.Add(Toggle("BurstGuard", L.T("Burst guard: background programs that load the processor give way to the game"), L.T("Only a program that keeps using a third of a processor or more; it is limited to half a processor until the game ends or you switch to it. When free memory is low, the game keeps its memory. On a clean PC it does nothing."), null, fallback: true));
+		stackPanel.Children.Add(Toggle("BurstGuardSoft", L.T("Burst guard: soft mode"), L.T("On: a busy background program only gives way to the game and is never stopped. Off: a hard limit of half a processor, which can pause that program for a moment."), null, fallback: true));
+		stackPanel.Children.Add(Toggle("LiveIrq", L.T("Watch driver latency while a game runs (live DPC/ISR)"), L.T("While the game runs, Windows measures how long each driver works. Drivers that took 1 ms or more go to the log. Nothing is changed."), null, fallback: true));
+		stackPanel.Children.Add(Toggle("LiveIrqMask", L.T("Keep the game off cores busy with interrupts"), L.T("Needs the line above. A core busy with interrupts more than 4% of the time (for 20 s) is taken away from the game until it calms down under 2%."), null, fallback: true));
 		return stackPanel;
-	}
-
-	/// <summary>
-	/// Tester key (1.15.0 Test 1.1): the key from the closed testers channel turns the test channel on. It is checked
-	/// against the published test builds before it is saved; "Remove" goes back to the stable channel.
-	/// </summary>
-	private UIElement TesterCard()
-	{
-		StackPanel col = Ui.Col(Ui.Head(L.T("Tester")), Ui.Note(L.T("Testers get a key in the closed Discord channel. With the key Toolbox also receives the test builds; without it, only stable releases.")));
-		TextBlock state = Ui.Text("", Ui.FsNote, "Dim", bold: false, wrap: true);
-		string typed = "";
-		void Show()
-		{
-			bool on = TesterKey.Current() != null;
-			state.Text = on ? L.T("Test channel on: this PC receives the test builds.") : L.T("No key: stable channel.");
-			state.Foreground = Ui.B(on ? "Accent" : "Dim");
-		}
-		TextBox box = Ui.Input("", 360.0, delegate(string v) { typed = v; });
-		Button save = null;
-		save = Ui.Btn(L.T("Save key"), delegate
-		{
-			byte[] key = TesterKey.Parse(typed);
-			if (key == null)
-			{
-				state.Text = L.T("This is not a tester key. Copy it whole, starting with DOST-.");
-				state.Foreground = Ui.B("Warn");
-				return;
-			}
-			save.IsEnabled = false;
-			state.Text = L.T("Checking the key…");
-			state.Foreground = Ui.B("Dim");
-			Task.Run(async delegate
-			{
-				string err = await Updater.TryKeyAsync(key);
-				S.Dispatcher.BeginInvoke((Action)delegate
-				{
-					save.IsEnabled = true;
-					if (err != null)
-					{
-						state.Text = L.T(err);
-						state.Foreground = Ui.B("Warn");
-						return;
-					}
-					Settings.Set("TesterKey", TesterKey.Format(key));
-					box.Text = "";
-					S.Did(L.T("Tester key saved: test channel on"));
-					Show();
-					UpdateService.Instance?.CheckNow();
-				});
-			});
-		});
-		Button remove = Ui.Btn(L.T("Remove key"), delegate
-		{
-			Settings.Reset("TesterKey");
-			S.Did(L.T("Tester key removed: stable channel"));
-			Show();
-			UpdateService.Instance?.CheckNow();
-		});
-		Show();
-		col.Children.Add(Ui.Row(box, save, remove));
-		col.Children.Add(state);
-		return col;
 	}
 
 	private UIElement FlagCard()
 	{
-		StackPanel stackPanel = Ui.Col(Ui.Head(L.T("Feature flags")), Ui.Note(L.T("Extended actions are closed by default. While a flag is closed, its controls are hidden and the engine refuses the action.")));
+		StackPanel stackPanel = Ui.Col(Ui.Head(L.T("Feature flags")), Ui.Note(L.T("Extra actions, closed by default. While closed, their buttons are hidden.")));
 		(string, string)[] array = new(string, string)[2]
 		{
 			("devices-write", L.T("Device interrupt policy write (Devices page)")),

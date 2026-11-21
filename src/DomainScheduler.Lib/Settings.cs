@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using Microsoft.Win32;
 
 namespace DomainScheduler;
@@ -210,7 +210,7 @@ public static class Settings
     static readonly Dictionary<string, Func<string>> Defaults = new(StringComparer.OrdinalIgnoreCase)
     {
         ["MaskName"] = DefaultMask,
-        ["IrqMode"] = () => "Core",
+        ["IrqMode"] = () => "Off",          // 1.16.0: owner's setting (manual mask rules do not step around pinned devices)
         ["DoMask"] = () => "true",
         ["DoThreads"] = () => "true",
         ["DoBackground"] = () => "true",
@@ -218,7 +218,7 @@ public static class Settings
         ["ReapplyMs"] = () => ThreadIni.LoadBundled().Sleep.ToString(CultureInfo.InvariantCulture),
         ["SysPresets"] = () => "true",
         ["BgOn"] = () => "true",
-        ["Top5On"] = () => "false",
+        ["Top5On"] = () => "true",   // no longer read since 1.16.0 Test 1.9: Top-5 is always on
         ["GpuOcCoreKHz"] = () => "0",
         ["GpuOcMemKHz"] = () => "0",
         ["GpuOcVoltPct"] = () => "0",
@@ -234,6 +234,7 @@ public static class Settings
         ["GameClass"] = () => "above",
         ["AllowElevatedPriority"] = () => "false",
         ["Autostart"] = () => "true",
+        ["Advanced"] = () => "true",        // 1.16.0: the advanced layout by default (owner's setting)
         ["Language"] = () => L.Detect(),
     };
 

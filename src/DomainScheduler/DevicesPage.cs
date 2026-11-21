@@ -104,20 +104,11 @@ internal sealed class DevicesPage : Page
 			return;
 		}
 		_auto.Children.Clear();
-		_auto.Children.Add(Ui.Head(L.T("Automatic interrupt layout")));
-		// What the layout does, in three short points (the full rules are in the README).
-		foreach (string point in new[]
-		{
-			L.T("Each key device gets a physical core of its own: the USB controller with the mouse, the graphics card, the network card, a game controller and a separate keyboard controller. Core 0 is avoided."),
-			L.T("MSI and high priority only where the device supports them. Disks are never touched; on laptops power saving is not changed."),
-			L.T("Works after a restart. Every original value is backed up: if Windows fails to start, the changes are undone by themselves (from Safe Mode: DomainScheduler.exe --revert-devices).")
-		})
-		{
-			TextBlock line = Ui.Text("•  " + point, Ui.FsNote, "Dim", bold: false, wrap: true);
-			line.Margin = new Thickness(0.0, 2.0, 0.0, 2.0);
-			_auto.Children.Add(line);
-		}
-		TextBlock wait = Ui.Note(L.T("Reading the devices and the processor ranking…"));
+		_auto.Children.Add(Ui.Head(L.T("Interrupt layout")));
+		// 1.16.0 Test 1.9: no big plan table on the page any more. One line on what it does; the plan itself is shown in
+		// the confirmation of "Apply the layout", and nothing is offered when the layout is already in place.
+		_auto.Children.Add(Ui.Note(L.T("The mouse, the graphics card and the network card get cores of their own. Works after a restart; every value is backed up and comes back by itself if Windows does not start.")));
+		TextBlock wait = Ui.Note(L.T("Reading the devices…"));
 		_auto.Children.Add(wait);
 		Task.Run(delegate
 		{
@@ -147,31 +138,6 @@ internal sealed class DevicesPage : Page
 		});
 	}
 
-	/// <summary>One line of the plan as a table row: role | device (and what happens, small) | now → after.</summary>
-	private static FrameworkElement PlanRow(string role, string device, string why, string now, string after, bool own)
-	{
-		Grid g = new Grid { Margin = new Thickness(0.0, 6.0, 0.0, 6.0) };
-		g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150.0) });
-		g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.0, GridUnitType.Star) });
-		g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(130.0) });
-		g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(30.0) });
-		g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150.0) });
-		TextBlock r = Ui.Text(role, Ui.FsNote, "Dim");
-		r.VerticalAlignment = VerticalAlignment.Top;
-		StackPanel d = new StackPanel { Margin = new Thickness(0.0, 0.0, 12.0, 0.0) };
-		TextBlock name = Ui.Text(device);
-		name.TextTrimming = TextTrimming.CharacterEllipsis;
-		name.ToolTip = device;
-		d.Children.Add(name);
-		d.Children.Add(Ui.Text(why, Ui.FsSmall, "Dim", bold: false, wrap: true));
-		TextBlock n = Ui.Text(now, Ui.FsNote, "Dim");
-		TextBlock arrow = Ui.Text("→", Ui.FsNote, "Dim");
-		TextBlock a = Ui.Text(after, Ui.FsNote, own ? "Accent" : "Dim");
-		Grid.SetColumn(d, 1); Grid.SetColumn(n, 2); Grid.SetColumn(arrow, 3); Grid.SetColumn(a, 4);
-		g.Children.Add(r); g.Children.Add(d); g.Children.Add(n); g.Children.Add(arrow); g.Children.Add(a);
-		return g;
-	}
-
 	private static string KindText(AutoKind k) => k switch
 	{
 		AutoKind.Gpu => L.T("Graphics"),
@@ -180,6 +146,19 @@ internal sealed class DevicesPage : Page
 		_ => L.T("USB")
 	};
 
+	/// <summary>The core a device of the plan gets, as written in the registry (0 = Windows decides).</summary>
+	private static ulong Want(AutoDevice d) => d.Slot != null ? d.Slot.Mask : 0UL;
+
+	/// <summary>One line of the confirmation: "Mouse · USB controller …: core 2".</summary>
+	private static string PlanLine(AutoDevice d)
+	{
+		string role = d.Slot != null ? RoleText(d.Slot.Role) : KindText(d.Kind);
+		string where = d.Slot != null && d.Slot.Mask != 0L ? L.F("processor {0}", Masks.Ranges(d.Slot.Mask))
+			: d.Kind == AutoKind.Net && d.Wifi ? L.T("not touched") : L.T("Windows decides");
+		string name = d.Name.Length > 48 ? d.Name[..47] + "…" : d.Name;
+		return (role.Length > 0 ? role + " · " : "") + name + ":  " + where;
+	}
+
 	private void RenderAuto(List<AutoDevice> plan)
 	{
 		if (plan.Count == 0)
@@ -187,33 +166,14 @@ internal sealed class DevicesPage : Page
 			_auto.Children.Add(Ui.Note(L.T("No devices with interrupt settings were found.")));
 			return;
 		}
-		Grid head = (Grid)PlanRow(L.T("Role"), L.T("Device"), "", L.T("Now"), L.T("After the restart"), own: false);
-		_auto.Children.Add(head);
-		foreach (AutoDevice item in plan)
+		var now = plan.Select(d => (Devices.ReadIrq(d.Id).Assign, Want(d))).ToList();
+		bool inPlace = IrqAuto.HasBackup && IrqAuto.LayoutInPlace(now);
+		int own = plan.Count(d => d.Slot != null && d.Slot.Mask != 0L);
+		if (inPlace)
 		{
-			IrqConfig irqConfig = Devices.ReadIrq(item.Id);
-			string text = ((irqConfig.Assign.GetValueOrDefault() != 0L) ? Masks.Ranges(irqConfig.Assign.Value) : L.T("Windows decides"));
-			string text2;
-			string s;
-			if (item.Slot != null)
-			{
-				text2 = ((item.Slot.Mask != 0L) ? L.F("processor {0}", Masks.Ranges(item.Slot.Mask)) : L.T("no core of its own"));
-				s = item.Slot.Why + ((item.NicMode.Length > 0) ? (" · RSS mode " + item.NicMode) : "");
-			}
-			else
-			{
-				text2 = ((item.Kind == AutoKind.Net && item.Wifi) ? L.T("not touched") : L.T("Windows decides"));
-				s = item.Kind switch
-				{
-					AutoKind.Gpu => L.T("Integrated graphics: MSI on if supported, the policy back to Windows"), 
-					AutoKind.Audio => item.DisplayAudio ? L.T("Display audio: MSI on if supported, nothing else") : L.T("Sound card: MSI on if supported, the policy back to Windows"), 
-					AutoKind.Net => L.T("Wi-Fi is not touched"), 
-					_ => L.T("USB controller without input devices: MSI on if supported, the policy back to Windows"), 
-				};
-			}
-			string s2 = ((item.Slot != null) ? RoleText(item.Slot.Role) : KindText(item.Kind));
-			bool own = item.Slot != null && item.Slot.Mask != 0L;
-			_auto.Children.Add(PlanRow(s2, item.Name, s, text, text2, own));
+			TextBlock ok = Ui.Text("✓  " + L.F("The layout is in place: {0} devices have cores of their own.", own), Ui.FsBody, "On", bold: false, wrap: true);
+			ok.Margin = new Thickness(0.0, 6.0, 0.0, 6.0);
+			_auto.Children.Add(ok);
 		}
 		if (!Flags.Open("devices-write"))
 		{
@@ -224,29 +184,51 @@ internal sealed class DevicesPage : Page
 			})));
 			return;
 		}
-		_auto.Children.Add(Ui.Row(Ui.ConfirmBtn(L.T("Apply the layout"), delegate
+		StackPanel row = Ui.Row();
+		if (!inPlace)
 		{
-			S.BusyTask(L.T("Writing…"), () => IrqAuto.Apply(plan), delegate(List<(string Text, bool Ok)> lines)
+			row.Children.Add(Ui.Primary(Ui.Btn(L.T("Apply the layout"), delegate
 			{
-				GameMask.InvalidateIrq();
-				foreach (var (message, flag) in lines ?? new List<(string, bool)>())
+				string text = L.T("These devices get these processors:") + "\n\n" + string.Join("\n", plan.Select(PlanLine)) + "\n\n"
+					+ L.T("Works after a restart of Windows. Every original value is backed up; if Windows does not start, everything is undone by itself.");
+				Window owner = Window.GetWindow(_auto);
+				MessageBoxResult r = owner != null
+					? MessageBox.Show(owner, text, L.T("Apply the layout"), MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel)
+					: MessageBox.Show(text, L.T("Apply the layout"), MessageBoxButton.OKCancel, MessageBoxImage.Question, MessageBoxResult.Cancel);
+				if (r != MessageBoxResult.OK)
 				{
-					S.Did(message, (!flag) ? AppLog.Sev.Error : AppLog.Sev.Info);
+					return;
 				}
-				S.Did(L.T("Restart Windows: the new interrupt cores start working after the restart"));
-				DrawAuto();
-				Refresh();
-			});
-		}), Ui.ConfirmBtn(L.T("Restore all devices"), delegate
+				S.BusyTask(L.T("Writing…"), () => IrqAuto.Apply(plan), delegate(List<(string Text, bool Ok)> lines)
+				{
+					GameMask.InvalidateIrq();
+					foreach (var (message, flag) in lines ?? new List<(string, bool)>())
+					{
+						S.Did(message, (!flag) ? AppLog.Sev.Error : AppLog.Sev.Info);
+					}
+					S.Did(L.T("Restart Windows: the new interrupt cores start working after the restart"));
+					DrawAuto();
+					Refresh();
+				});
+			}, 190.0)));
+		}
+		if (IrqAuto.HasBackup)
 		{
-			S.BusyTask(L.T("Writing…"), Devices.RevertAll, delegate(string err)
+			row.Children.Add(Ui.ConfirmBtn(L.T("Restore all devices"), delegate
 			{
-				GameMask.InvalidateIrq();
-				S.Did((err == null) ? L.T("Device policies restored from the backup; restart Windows") : L.F("Devices: {0}", err), (err != null) ? AppLog.Sev.Error : AppLog.Sev.Info);
-				DrawAuto();
-				Refresh();
-			});
-		})));
+				S.BusyTask(L.T("Writing…"), Devices.RevertAll, delegate(string err)
+				{
+					GameMask.InvalidateIrq();
+					S.Did((err == null) ? L.T("Device policies restored from the backup; restart Windows") : L.F("Devices: {0}", err), (err != null) ? AppLog.Sev.Error : AppLog.Sev.Info);
+					DrawAuto();
+					Refresh();
+				});
+			}));
+		}
+		if (row.Children.Count > 0)
+		{
+			_auto.Children.Add(row);
+		}
 	}
 
 	private static string PrioText(int? p)

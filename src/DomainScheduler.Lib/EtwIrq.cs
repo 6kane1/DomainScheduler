@@ -70,6 +70,7 @@ public sealed class EtwIrq : IDisposable
             ulong trace = _trace;
             _thread = new Thread(() =>
             {
+                SelfThreads.Register(L.N("DPC/ISR trace"));
                 try { ProcessTrace(new[] { trace }, 1, IntPtr.Zero, IntPtr.Zero); }
                 catch (Exception) { }
             }) { IsBackground = true, Name = "etw-irq", Priority = ThreadPriority.BelowNormal };

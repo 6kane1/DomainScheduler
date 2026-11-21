@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 
 namespace DomainScheduler;
@@ -97,6 +97,8 @@ public sealed class AutoController
     public Func<string, (string First, string Others)> Heat;
     /// <summary>22.3: soft closing of the user's list when a game becomes active.</summary>
     public SoftClose Soft;
+    /// <summary>The burst guard (1.16.0 Test 1.10): caps heavy background programs during the game. Set by the hub.</summary>
+    public BurstGuard Burst;
     bool _bgStandalone;
     DateTime _top5MetaAt;
     /// <summary>The dynamic Top-5 mode: instead of the role plan, five slots are re-ranked every second.</summary>
@@ -373,6 +375,7 @@ public sealed class AutoController
 
     void ClearGame()
     {
+        try { Burst?.Release(); } catch (Exception ex) { Note(L.F("Burst guard: {0}", AppLog.Describe(ex)), AppLog.Sev.Warn); }
         Dynamic.Stop(false);      // the handles are closed; the values were put back by the engine's revert
         _game = 0;
         _gameCreated = 0;
@@ -462,6 +465,11 @@ public sealed class AutoController
         // they are reverted when the game ends, on the Revert button, or when Auto is switched off.
         _absentSince = default;
         if (Top5Mode && Dynamic.Running) Dynamic.Tick(now, _e.ThreadsNow(_game));
+        if (Burst != null && Burst.On && _tick % BurstPolicy.SampleSeconds == 0)
+        {
+            try { Burst.Tick(_game, _gameCreated, true, BackgroundCandidates(_e.ProcessesNow(), null), _probe.ForegroundPid()); }
+            catch (Exception ex) { Note(L.F("Burst guard: {0}", AppLog.Describe(ex)), AppLog.Sev.Warn); }
+        }
         if (ReapplyTick)
         {
             if (!Reapply(now)) return;
@@ -812,6 +820,26 @@ public sealed class AutoController
     {
         var t = TopoBuilder.Live();
         var procs = _e.ProcessesNow();
+        var list = new List<uint>();
+        var timerOnly = new List<uint>();
+        Classify(procs, games, list, timerOnly, null);
+        ulong gameMask = maskOverride ?? _mask?.Mask ?? 0;
+        ulong bg = t != null ? Masks.BgMask(t, gameMask) : 0;
+        if (t != null && bg == t.FullMask()) bg = 0;   // nothing to separate from
+        _e.ApplyBackground(list, bg, true, timerOnly);
+    }
+
+    /// <summary>The background programs of the user's session the background layer may change (pid, exe): the burst guard's candidates.</summary>
+    List<(uint Pid, string Name)> BackgroundCandidates(Dictionary<uint, (string Name, uint Parent)> procs, HashSet<uint> games)
+    {
+        var named = new List<(uint, string)>();
+        Classify(procs, games, new List<uint>(), new List<uint>(), named);
+        return named;
+    }
+
+    /// <summary>Sorts the processes for the background layer: <paramref name="list"/> are lowered, <paramref name="timerOnly"/> (other sessions) only lose their timer requests.</summary>
+    void Classify(Dictionary<uint, (string Name, uint Parent)> procs, HashSet<uint> games, List<uint> list, List<uint> timerOnly, List<(uint, string)> named)
+    {
         uint self = _probe.SelfPid, mySession = _probe.SessionOf(self);
         uint fg = _probe.ForegroundPid();
         var selfTree = new HashSet<uint> { self };
@@ -823,8 +851,6 @@ public sealed class AutoController
                 if (!selfTree.Contains(pid) && selfTree.Contains(p.Parent)) grew = selfTree.Add(pid);
         }
         var running = RunningExes(procs).ToList();
-        var list = new List<uint>();
-        var timerOnly = new List<uint>();
         foreach (var (pid, p) in procs)
         {
             if (pid is 0 or 4 || pid == _game || selfTree.Contains(pid)) continue;
@@ -839,11 +865,8 @@ public sealed class AutoController
             if (Guard.Gate(p.Name, Guard.Op.Process, false, running) != null) continue;
             if (_probe.SessionOf(pid) != mySession) { timerOnly.Add(pid); continue; }
             list.Add(pid);
+            named?.Add((pid, p.Name));
         }
-        ulong gameMask = maskOverride ?? _mask?.Mask ?? 0;
-        ulong bg = t != null ? Masks.BgMask(t, gameMask) : 0;
-        if (t != null && bg == t.FullMask()) bg = 0;   // nothing to separate from
-        _e.ApplyBackground(list, bg, true, timerOnly);
     }
 
     long CreatedOf(uint pid) => _probe.CpuTime(pid, out long c, out _) ? c : 0;

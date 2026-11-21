@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -91,14 +91,6 @@ internal sealed class GameThreadsPage : Page
 			FontSize = Ui.FsBody,
 			Margin = new Thickness(3.0, 0.0, 0.0, 0.0)
 		};
-		_role.Click += delegate
-		{
-			SetMode(top5: false);
-		};
-		_top5.Click += delegate
-		{
-			SetMode(top5: true);
-		};
 		Border element = new Border
 		{
 			CornerRadius = new CornerRadius(3.0),
@@ -121,8 +113,8 @@ internal sealed class GameThreadsPage : Page
 		{
 			Margin = new Thickness(0.0, 0.0, 0.0, 16.0)
 		};
-		DockPanel.SetDock(element, Dock.Right);
-		dockPanel.Children.Add(element);
+		// 1.16.0 Test 1.9: the role plan is gone (it only made things worse in the owner's measurements); dynamic Top-5
+		// is the only thread mode, so the mode switch is not shown.
 		dockPanel.Children.Add(Ui.Col(textBlock, _sub));
 		_headRow = new Grid();
 		_key = "";
@@ -144,11 +136,10 @@ internal sealed class GameThreadsPage : Page
 			obj.LineHeight = Ui.FsNote * 1.5;
 			obj.Margin = new Thickness(0.0, 0.0, 14.0, 0.0);
 		}
-		TextBlock textBlock3 = Ui.Note(L.T("To compare the two modes, play the same scene with each and look at the 1% low / p99 frame time; a few percent of difference is noise."));
 		StackPanel child = Ui.Col(dockPanel, _headRow, _rows, new Border
 		{
 			Height = 16.0
-		}, Ui.Card(uniformGrid), Ui.Card(Ui.Col(Ui.Head(L.T("Last moves")), _log)), textBlock3);
+		}, Ui.Card(uniformGrid), Ui.Card(Ui.Col(Ui.Head(L.T("Last moves")), _log)));
 		Tick();
 		return Ui.Scroll(child);
 		static UIElement Column(string head, UIElement body)
@@ -157,25 +148,6 @@ internal sealed class GameThreadsPage : Page
 			textBlock4.FontWeight = FontWeights.Medium;
 			textBlock4.Margin = new Thickness(0.0, 0.0, 12.0, 3.0);
 			return Ui.Col(textBlock4, body);
-		}
-	}
-
-	private void SetMode(bool top5)
-	{
-		if (!_busy && H.Auto.Top5Mode != top5)
-		{
-			_busy = true;
-			Settings.SetBool("Top5On", top5);
-			S.Did(top5 ? L.T("Dynamic Top-5: on") : L.T("Dynamic Top-5: off"));
-			H.Opt.Run(delegate
-			{
-				H.Auto.SetTop5(top5);
-				return top5;
-			}, delegate
-			{
-				_busy = false;
-				Tick();
-			});
 		}
 	}
 

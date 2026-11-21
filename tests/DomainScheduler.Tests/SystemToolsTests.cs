@@ -199,6 +199,7 @@ public class SystemToolsTests : IDisposable
         NvOc.VoltGetHook = () => NvOc.BuildVolt(volt);
         NvOc.VoltSetHook = b => { sets++; volt = BitConverter.ToInt32(b, 4); return 0; };
 
+        Flags.Set(Flags.GpuOc, false);                                                  // open by default since 1.16.0: close it for this check
         Assert.Null(NvOc.Set(NvOc.DomainCore, 100_000));                               // the flag is closed
         Assert.Null(NvOc.SetVoltage(50));
         Assert.Equal(0, sets);

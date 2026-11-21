@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -86,7 +86,7 @@ internal sealed class AboutPage : Page
 			.Add(L.T("Settings"), "HKCU\\Software\\DomainScheduler · HKLM\\SOFTWARE\\Domain OS\\Toolbox")
 			.Add(L.T("Own load"), H.SelfLine())
 			.Add(L.T("SelfTest"), (H.SelfTest.Count == 0) ? L.T("OK") : string.Join("; ", H.SelfTest));
-		return Ui.Scroll(Ui.Col(new UpdateCard(always: true).Root, Ui.Card(Ui.Col(Ui.Head(L.T("This computer")), factGrid)), Ui.Card(Ui.Col(Ui.Head("DomainScheduler"), factGrid2))));
+		return Ui.Scroll(Ui.Col(Ui.Card(Ui.Col(Ui.Head(L.T("This computer")), factGrid)), Ui.Card(Ui.Col(Ui.Head("DomainScheduler"), factGrid2))));
 		static UIElement Fact(string k, TextBlock v)
 		{
 			DockPanel obj = new DockPanel

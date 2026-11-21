@@ -17,8 +17,13 @@ public static class AppVersion
     /// <summary>"1.15.0" or "1.15.0-test1.1" (the informational version without the "+commit" tail).</summary>
     public static string Full => _full ??= Read();
 
-    /// <summary>"stable" or "test".</summary>
-    public static string Channel => TesterKey.Current() != null ? "test" : "stable";
+    /// <summary>
+    /// "stable" or "test": test while a tester key is saved, unless the tester chose "stable releases only" (1.16.0:
+    /// Settings "TestBuilds" = false keeps the key but asks for stable releases only).
+    /// </summary>
+    public static string Channel => ChannelFor(TesterKey.Current() != null, Settings.GetBool("TestBuilds", fallback: true));
+
+    public static string ChannelFor(bool hasKey, bool wantsTest) => hasKey && wantsTest ? "test" : "stable";
 
     public static bool IsTest => Channel == "test";
 
@@ -160,8 +165,17 @@ public static class UpdateVersion
     }
 }
 
-/// <summary>One file in an update feed: Toolbox or the playbook. Sealed: the file is encrypted with the tester key (Sha256/Size are of the encrypted file).</summary>
-public sealed record UpdateFile(string Version, string Url, string Sha256, long Size, string NotesEn, string NotesRu, bool Sealed = false);
+/// <summary>
+/// One file in an update feed: Toolbox or the playbook. Sealed: the file is encrypted with the tester key (Sha256/Size
+/// are of the encrypted file). Token (1.16.0 Test 1.8): test builds live in a private repository that only the owner
+/// and the testers can see; the sealed test feed carries a read-only GitHub token for that one repository, and the
+/// download asks the GitHub API with it. Only a sealed entry may carry a token, and only for an api.github.com URL.
+/// </summary>
+public sealed record UpdateFile(string Version, string Url, string Sha256, long Size, string NotesEn, string NotesRu, bool Sealed = false, string Token = null)
+{
+    /// <summary>Never prints the token (logs, exceptions, debugger).</summary>
+    public override string ToString() => $"{Version} {Url}";
+}
 
 /// <summary>update/stable.json or update/test.json on the site.</summary>
 public sealed record UpdateFeed(UpdateFile Toolbox, UpdateFile Playbook);
@@ -185,6 +199,8 @@ public sealed record UpdateCheck(UpdateFile Toolbox, UpdateFile Playbook, string
 public static class Updater
 {
     public const string FeedBase = "https://6kane1.github.io/DomainOS/update/";
+    /// <summary>The only place a feed token is ever sent to (a release asset of the private test repository).</summary>
+    public const string GitHubApi = "https://api.github.com/repos/";
 
     /// <summary>
     /// The public half of the main Domain OS update key (ECDSA P-256). Every feed is signed with a private half, which
@@ -293,16 +309,24 @@ public static class Updater
     public static UpdateFeed ParseFeed(string json)
     {
         using var doc = JsonDocument.Parse(json);
+        // A feed that is not a JSON object (a number, a list …) offers nothing; found by the fuzz tests (1.16.0).
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) return new UpdateFeed(null, null);
         return new UpdateFeed(File(doc.RootElement, "toolbox"), File(doc.RootElement, "playbook"));
 
         static UpdateFile File(JsonElement root, string name)
         {
             if (!root.TryGetProperty(name, out var e) || e.ValueKind != JsonValueKind.Object) return null;
             string S(string k) => e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-            long size = e.TryGetProperty("size", out var z) && z.ValueKind == JsonValueKind.Number ? z.GetInt64() : 0;
+            // TryGetInt64: a fractional or huge size ("1.5", "1e30") is a bad entry, not an exception (fuzz tests, 1.16.0)
+            long size = e.TryGetProperty("size", out var z) && z.ValueKind == JsonValueKind.Number && z.TryGetInt64(out long zl) ? zl : 0;
             bool sealedFile = e.TryGetProperty("sealed", out var se) && se.ValueKind == JsonValueKind.True;
-            var f = new UpdateFile(S("version"), S("url"), S("sha256")?.ToLowerInvariant(), size, S("notes_en") ?? "", S("notes_ru") ?? "", sealedFile);
-            bool ok = f.Version != null && VersionRx.IsMatch(f.Version) && UpdateVersion.Parse(f.Version) != null
+            string token = S("token");
+            var f = new UpdateFile(S("version"), S("url"), S("sha256")?.ToLowerInvariant(), size, S("notes_en") ?? "", S("notes_ru") ?? "", sealedFile, token);
+            // A token goes only with a sealed (test) entry and only to the GitHub API; a token in the open stable feed, a
+            // token for another host or a token with odd characters makes the whole entry bad.
+            bool tokenOk = token == null || (sealedFile && token.Length is > 10 and < 512 && token.All(c => char.IsAsciiLetterOrDigit(c) || c == '_')
+                                             && f.Url != null && f.Url.StartsWith(GitHubApi, StringComparison.OrdinalIgnoreCase));
+            bool ok = tokenOk && f.Version != null && VersionRx.IsMatch(f.Version) && UpdateVersion.Parse(f.Version) != null
                       && f.Url != null && f.Url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
                       && f.Sha256 is { Length: 64 } && f.Sha256.All(Uri.IsHexDigit) && f.Size > 0 && f.Size <= MaxDownloadBytes;
             return ok ? f : null;
@@ -346,7 +370,7 @@ public static class Updater
             var stable = await Get("stable.json");
             UpdateFeed test = null;
             byte[] key = TesterKey.Current();
-            if (key != null)
+            if (key != null && AppVersion.Channel == "test")
             {
                 byte[] box = await Fetch(http, "test.bin", ct);
                 if (box != null)
@@ -412,7 +436,9 @@ public static class Updater
         if (f == null || f.Size <= 0 || f.Size > MaxDownloadBytes) throw new InvalidDataException("The update entry has no valid size.");
         using var http = Client(TimeSpan.FromMinutes(30));
         byte[] buf = new byte[f.Size];
-        using (var resp = await http.GetAsync(f.Url, HttpCompletionOption.ResponseHeadersRead, ct))
+        string url = f.Url;
+        if (f.Token != null) url = await ResolvePrivateAsset(f, ct);
+        using (var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct))
         {
             resp.EnsureSuccessStatusCode();
             if (resp.Content.Headers.ContentLength is long cl && cl != f.Size) throw new InvalidDataException("The file is not the size the update says.");
@@ -420,6 +446,33 @@ public static class Updater
             await ReadAll(src, buf, progress, ct);
         }
         return Check(buf, f);
+    }
+
+    /// <summary>
+    /// A release asset of the private test repository: the GitHub API, asked with the token, answers with a redirect to a
+    /// short-lived download address. Redirects are followed by hand so the token goes to api.github.com only and never
+    /// to the download host; the file itself is then fetched without it.
+    /// </summary>
+    static async Task<string> ResolvePrivateAsset(UpdateFile f, CancellationToken ct)
+    {
+        if (!f.Url.StartsWith(GitHubApi, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("A token may only be sent to the GitHub API.");
+        using var api = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromMinutes(2) };
+        api.DefaultRequestHeaders.UserAgent.ParseAdd("DomainOS-Toolbox/" + AppVersion.Full.Replace('+', '.'));
+        using var req = new HttpRequestMessage(HttpMethod.Get, f.Url);
+        req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", f.Token);
+        req.Headers.Accept.ParseAdd("application/octet-stream");
+        req.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+        using var resp = await api.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        if ((int)resp.StatusCode is >= 300 and < 400 && resp.Headers.Location is { } loc)
+        {
+            var to = loc.IsAbsoluteUri ? loc : new Uri(new Uri(f.Url), loc);
+            if (to.Scheme != Uri.UriSchemeHttps) throw new InvalidDataException("The test download did not point to an https address.");
+            return to.AbsoluteUri;
+        }
+        if (resp.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+            throw new InvalidDataException("The test build could not be fetched: the testers' access to it was changed. Get the newest test build from the testers channel.");
+        resp.EnsureSuccessStatusCode();
+        throw new InvalidDataException("The GitHub API did not give a download address.");
     }
 
     /// <summary>Reads exactly buf.Length bytes; more data than that is refused.</summary>

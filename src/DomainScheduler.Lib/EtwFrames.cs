@@ -67,13 +67,17 @@ public sealed class EtwFrames : IFrameSource, IDisposable
 			};
 			TraceEventProviderOptions options = new TraceEventProviderOptions
 			{
-				ProcessIDFilter = new List<int> { (int)pid }
+				ProcessIDFilter = new List<int> { (int)pid },
+				// Only "Present start" (42) is used (OnEvent): the driver then does not log the provider's other events at
+				// all, and the frame thread does not parse them (1.16.0 Test 1: own load).
+				EventIDsToEnable = new List<int> { 42 }
 			};
 			_session.EnableProvider(Dxgi, TraceEventLevel.Informational, ulong.MaxValue, options);
 			_session.Source.Dynamic.All += OnEvent;
 			TraceEventSession session = _session;
 			_thread = new Thread((ThreadStart)delegate
 			{
+				SelfThreads.Register(L.N("frame trace"));
 				try
 				{
 					session.Source.Process();

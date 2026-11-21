@@ -944,6 +944,18 @@ internal sealed class GpuPage : Page
 		Add(apply);
 		Add(Ui.Btn(atStart ? L.T("Do not apply at start") : L.T("Apply at start"), delegate
 		{
+			// The same values (or higher) already crashed Windows: ask first, "No" is the default (1.16.0).
+			GpuCrash crash = atStart ? null : GpuOcLogic.CrashedBefore(p, _store.Crashes);
+			if (crash != null)
+			{
+				string q = L.F("Windows crashed on {0} with these values or lower (core {1:+0;-0;0} MHz, memory {2:+0;-0;0} MHz). Applied at every start, they can crash it again.\n\nLower at least one value first. Apply \"{3}\" at start anyway?", crash.Utc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), crash.CoreMHz, crash.MemMHz, p.Name);
+				if (MessageBox.Show(q, L.T("Domain OS Toolbox: GPU profile"), MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+				{
+					S.Did(L.F("GPU profile \"{0}\": not marked for the start (it crashed Windows before)", p.Name));
+					return;
+				}
+				AppLog.Add(L.F("GPU profile \"{0}\": marked for the start although Windows crashed with these values on {1}", p.Name, crash.Utc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture)), AppLog.Sev.Warn);
+			}
 			_store.SetAtStart(atStart ? null : p.Name);
 			if (SaveStore())
 			{
@@ -994,6 +1006,13 @@ internal sealed class GpuPage : Page
 			TextBlock other = Ui.Note(L.T("This profile was saved for a card of another maker: it is never applied at start on this card. Loading it into the sliders keeps only what this card allows."));
 			other.Margin = new Thickness(0.0, 4.0, 0.0, 0.0);
 			return Ui.Col(actions, renameRow, other);
+		}
+		GpuCrash crashed = GpuOcLogic.CrashedBefore(p, _store.Crashes);
+		if (crashed != null)
+		{
+			TextBlock warn = Ui.Text(L.F("Windows crashed on {0} with these values or lower (core {1:+0;-0;0} MHz, memory {2:+0;-0;0} MHz). Lower at least one value before you apply this profile at start.", crashed.Utc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), crashed.CoreMHz, crashed.MemMHz), Ui.FsNote, "Warn", bold: false, wrap: true);
+			warn.Margin = new Thickness(0.0, 4.0, 0.0, 0.0);
+			return Ui.Col(actions, renameRow, warn);
 		}
 		return Ui.Col(actions, renameRow);
 	}

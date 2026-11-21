@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Management;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
@@ -699,6 +699,22 @@ public static class IrqAuto
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(_bk));
         File.Move(path + ".tmp", path, true);
+    }
+
+    /// <summary>
+    /// 1.16.0 Test 1.9: is the layout already written? Each pair is (the affinity policy now, the processors the plan
+    /// gives; 0 = no core of its own, Windows decides). True only when every device already matches, so the Devices
+    /// page does not offer to write the same layout again.
+    /// </summary>
+    public static bool LayoutInPlace(IEnumerable<(ulong? Now, ulong Want)> devices)
+    {
+        bool any = false;
+        foreach (var (now, want) in devices)
+        {
+            any = true;
+            if ((now ?? 0UL) != want) return false;
+        }
+        return any;
     }
 
     public static bool HasBackup

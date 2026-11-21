@@ -89,6 +89,15 @@ public static class IrqLayout
         }
         // The target CCD.
         var ccds = p.Select(u => u.Ccd).Distinct().OrderBy(x => x).ToList();
+        // 1.16.0-test1.7: a processor with 6 cores or fewer (one CCD, no E-cores) gives no device a core of its own;
+        // 8 cores and more keep the layout as before (owner's decision). On a tester's i5-10400F (6 cores) the cores taken
+        // from the game cost 6% of the 1% low. The devices keep high interrupt priority; Windows places their interrupts.
+        if (!hybrid && ccds.Count == 1 && p.Count <= AutoLogic.SmallCpuCores)
+        {
+            foreach (var s in slots)
+                s.Why = L.F("No core of its own: a processor with {0} cores gives every core to the game; Windows places the interrupts", p.Count);
+            return slots;
+        }
         int target = -1;
         if (ccds.Count >= 2)
         {

@@ -1,8 +1,8 @@
-namespace DomainScheduler;
+﻿namespace DomainScheduler;
 
 /// <summary>
 /// Feature flags (section 22.12): the subkey Flags of the settings, one bool per key, all closed
-/// by default except "core". A closed flag hides the control in the UI and makes the engine
+/// by default except "core", "devices-write" and "gpu-oc" (open since 1.16.0). A closed flag hides the control in the UI and makes the engine
 /// refuse the action with a warning.
 /// </summary>
 public static class Flags
@@ -16,7 +16,9 @@ public static class Flags
     {
         if (!FlagKeys.Contains(key)) return false;
         if (Settings.Backend.TryGet(Sub, key, out var v) && !string.IsNullOrEmpty(v)) return v.Equals("true", StringComparison.OrdinalIgnoreCase);
-        return key == Core;
+        // 1.16.0: the owner's defaults: the device layout and GPU overclocking pages are open (both still ask before
+        // writing anything); the other extended actions stay closed.
+        return key is Core or DevicesWrite or GpuOc;
     }
 
     public static void Set(string key, bool open)

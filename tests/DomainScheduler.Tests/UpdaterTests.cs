@@ -284,4 +284,23 @@ public class TesterKeyTests
         var f = Updater.ParseFeed("{\"toolbox\":{\"version\":\"1.15.0-test1.2\",\"sealed\":true,\"url\":\"https://a/tb.bin\",\"sha256\":\"" + sha + "\",\"size\":9}}");
         Assert.True(f.Toolbox.Sealed);
     }
+
+    [Fact]
+    public void FeedTokenOnlyForSealedEntriesAndTheGitHubApi()
+    {
+        string sha = new string('b', 64), tok = "github_pat_" + new string('A', 40);
+        string E(bool sealedOn, string url, string token) => "{\"toolbox\":{\"version\":\"1.16.0-test1.8\",\"sealed\":" + (sealedOn ? "true" : "false")
+            + ",\"url\":\"" + url + "\",\"sha256\":\"" + sha + "\",\"size\":9,\"token\":\"" + token + "\"}}";
+        const string api = "https://api.github.com/repos/6kane1/DomainOS-test/releases/assets/1";
+        var ok = Updater.ParseFeed(E(true, api, tok)).Toolbox;
+        Assert.NotNull(ok);
+        Assert.Equal(tok, ok.Token);
+        Assert.DoesNotContain(tok, ok.ToString());
+        Assert.Null(Updater.ParseFeed(E(false, api, tok)).Toolbox);                       // never in the open stable feed
+        Assert.Null(Updater.ParseFeed(E(true, "https://evil.example/x", tok)).Toolbox);   // never to another host
+        Assert.Null(Updater.ParseFeed(E(true, "https://api.github.com.evil.example/repos/x", tok)).Toolbox);
+        Assert.Null(Updater.ParseFeed(E(true, api, "abc\\r\\nX-Evil: 1")).Toolbox);       // no header injection
+        Assert.Null(Updater.ParseFeed(E(true, api, "short")).Toolbox);
+        Assert.Null(Updater.ParseFeed("{\"toolbox\":{\"version\":\"1.16.0\",\"sealed\":true,\"url\":\"https://a/tb.bin\",\"sha256\":\"" + sha + "\",\"size\":9}}").Toolbox.Token);
+    }
 }

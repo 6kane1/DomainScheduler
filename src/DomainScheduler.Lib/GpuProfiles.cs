@@ -24,6 +24,21 @@ public sealed class GpuProfile
     public string Maker => Vendor == GpuOc.Amd ? GpuOc.Amd : GpuOc.Nvidia;
 }
 
+/// <summary>
+/// Values that were set when Windows crashed (1.16.0): kept so the same values (or higher) are not marked for the start
+/// again by one click. Clocks are offsets like a profile's.
+/// </summary>
+public sealed class GpuCrash
+{
+    public string Name { get; set; } = "";
+    public int CoreMHz { get; set; }
+    public int MemMHz { get; set; }
+    public int VoltPct { get; set; }
+    public int PowerPct { get; set; }
+    public string Vendor { get; set; } = "";
+    public DateTime Utc { get; set; }
+}
+
 /// <summary>A slider range: whole steps from Min to Max (both on the step grid, Min ≤ 0 ≤ Max when the driver allows it).</summary>
 public readonly record struct GpuRange(int Min, int Max, int Step)
 {
@@ -49,6 +64,18 @@ public sealed class GpuProfiles
     /// <summary>The profile that was NOT re-applied at the last start because of the crash guard (empty = none).</summary>
     public string Skipped { get; set; } = "";
     public DateTime SkippedUtc { get; set; }
+    /// <summary>The values set before each crash the guard saw, newest last (at most MaxCrashes).</summary>
+    public List<GpuCrash> Crashes { get; set; } = new();
+    public const int MaxCrashes = 10;
+
+    /// <summary>Remembers the profile's values as crashed (called by the crash guard at start).</summary>
+    public void RecordCrash(GpuProfile p, DateTime utc)
+    {
+        if (p == null) return;
+        Crashes ??= new();
+        Crashes.Add(new GpuCrash { Name = p.Name, CoreMHz = p.CoreMHz, MemMHz = p.MemMHz, VoltPct = p.VoltPct, PowerPct = p.PowerPct, Vendor = p.Maker, Utc = utc });
+        while (Crashes.Count > MaxCrashes) Crashes.RemoveAt(0);
+    }
     /// <summary>
     /// The profile that was marked "apply at start" in a version before 1.15.0 Test 1.3 (empty = none). The old file lay
     /// in a folder any program of the user can change, so the mark is not taken over as it is: the program asks once,
@@ -162,6 +189,7 @@ public sealed class GpuProfiles
             }
             g.AtStart = g.Find(g.AtStart)?.Name ?? "";
             g.Skipped ??= "";
+            g.Crashes = (g.Crashes ?? new()).Where(c => c != null).TakeLast(MaxCrashes).ToList();
             g.Confirm = g.AtStart.Length > 0 ? "" : g.Find(g.Confirm)?.Name ?? "";
             return g;
         }
@@ -228,6 +256,20 @@ public static class GpuOcLogic
     public static bool Fits(GpuProfile p, string vendor) => p != null && (vendor == GpuOc.Nvidia || vendor == GpuOc.Amd) && p.Maker == vendor;
 
     public enum Start { Nothing, Apply, SkipCrash }
+
+    /// <summary>
+    /// The newest crash whose values this profile reaches or exceeds on the same maker's card: every clock offset and the
+    /// voltage boost / power limit at least as high. Null when the profile is lower in at least one of them (or is stock).
+    /// Marking such a profile for the start asks first (1.16.0): 19.11.2026 the same values were marked again 9 minutes
+    /// after a crash.
+    /// </summary>
+    public static GpuCrash CrashedBefore(GpuProfile p, IEnumerable<GpuCrash> crashes)
+    {
+        if (p == null || p.IsStock || crashes == null) return null;
+        return crashes.Where(c => c != null && (c.Vendor.Length == 0 ? GpuOc.Nvidia : c.Vendor) == p.Maker
+                && p.CoreMHz >= c.CoreMHz && p.MemMHz >= c.MemMHz && p.VoltPct >= c.VoltPct && p.PowerPct >= c.PowerPct)
+            .OrderByDescending(c => c.Utc).FirstOrDefault();
+    }
 
     /// <summary>
     /// At the start of the program: apply the marked profile, unless the flag is closed, there is none, it is all zero,

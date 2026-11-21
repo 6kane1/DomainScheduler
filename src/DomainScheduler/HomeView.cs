@@ -186,6 +186,7 @@ internal sealed class HomeView
 	{
 		_h = h;
 		_s = s;
+		SelfThreads.Register(L.N("window"));
 		_timer = new DispatcherTimer(DispatcherPriority.Background)
 		{
 			Interval = Bucket

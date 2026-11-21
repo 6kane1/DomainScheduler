@@ -21,9 +21,9 @@ and a more even frame pacing — not a higher average FPS.
 - **One-button Auto mode.** Finds a game from your watchlist, picks cores for it (cache-aware on
   dual-CCD X3D and hybrid P/E CPUs), raises its priority class to Above normal, gives its key
   threads a preferred core each and lowers background programs.
-- **Two thread modes.** *Role plan* (default): main / render / audio / worker threads are
-  recognized and placed once. *Dynamic Top-5* (experimental): the five busiest threads are
-  re-ranked every second and moved between cores and priorities as the load changes.
+- **Dynamic Top-5.** The five busiest threads of the game are re-ranked every second and moved
+  between cores and priorities as the load changes. (The older "role plan" mode was removed in
+  1.16.0 Test 1.9: in the owner's measurements it only made things worse.)
 - **Watchlist and denylist.** Only programs you mark are tuned. System-critical processes and
   anti-cheat software are never opened or changed.
 - **Background layer.** While a watched game runs, other programs get Below-normal priority,
@@ -31,10 +31,14 @@ and a more even frame pacing — not a higher average FPS.
 - **Built-in presets** for Windows components and common background apps; your own presets with
   import, export and profiles.
 - **Core masks** with a visual CPU map, interrupt-aware refinement and optional core reservation.
-- **Devices page**: read-only view of interrupt pinning (writing is an opt-in advanced feature).
+- **Devices page**: interrupt pinning and the automatic layout (writing is open since 1.16.0 and asks for confirmation first).
 - **Frame-time watchdog.** If p99 frame time gets worse after the changes, they are taken off,
   re-measured, and kept off if the regression is real.
-- **Cache cleaner**, autostart through Task Scheduler, a one-click report, a colour-coded log.
+- **Check page** (1.16.0 Test 1.1): one 30-second run while you play — FPS, 1% / 0.1% low, longest frame, hitches and
+  how long the game's threads wait for a processor; the report is saved on the desktop. Nothing in the game is opened
+  (kernel trace and DXGI frames only).
+- **Cache cleaner**, autostart through Task Scheduler, a one-click report, a colour-coded log. The About page splits
+  the program's own load by thread (window, worker, DPC/ISR trace, frame trace) since 1.16.0 Test 1.
 
 No kernel driver, no DLL injection, no hooks, no memory patching — only documented Windows APIs
 (affinity, CPU Sets, ideal processor, priority classes, thread priority and boost, I/O and memory
@@ -75,10 +79,9 @@ Settings that apply to every CPU:
 |---|---|
 | Auto | **On** — this is the main mode |
 | Built-in system presets, background layer (`BgOn`), warm-up | **On** (default) |
-| Thread mode | **Role plan** (default). Try *Dynamic Top-5* for games without thread names or with a changing load, and compare |
 | Thread CPU Sets (hard limit of a thread to one core) | **Off**. Free migration is usually better |
 | SMT / Hyper-Threading | Leave **enabled** in the BIOS; use `nosmt` in the mask if you want to test without it |
-| Feature flags (timer resolution, live DPC/ISR, device policy write, soft close) | **Closed** unless you know why you need one |
+| Feature flags | Device policy write and GPU overclocking **open** since 1.16.0 (both ask before writing); timer resolution, live DPC/ISR flag and soft close **closed** unless you know why you need one |
 | Heat policy in presets | `none` |
 
 ## How to check the effect
@@ -113,7 +116,7 @@ Settings that apply to every CPU:
 
 ## GPU overclock
 
-Behind its own feature flag (Settings → feature flags → GPU overclocking, closed by default) the Graphics card page
+Behind its own feature flag (Settings → feature flags → GPU overclocking, open by default since 1.16.0; nothing is written until you apply a profile) the Graphics card page
 offers a small, careful overclock with named profiles, one of which can be applied at every start.
 
 - **NVIDIA** (through the NVIDIA driver): core and memory clock offsets and the voltage boost (0–100 % of what the
@@ -134,16 +137,24 @@ offers a small, careful overclock with named profiles, one of which can be appli
   works after a failed apply or in a new session.
 - **Apply at start** re-applies the marked profile only on a card of the maker it was saved for, and never after
   Windows went down unexpectedly since the last apply (blue screen, freeze with a power-off): the crash guard is the
-  same for both makers.
+  same for both makers. Values that crashed Windows are remembered (since 1.16.0 Test 1): marking the same values or
+  higher for the start again asks first, with "No" as the default, and the profile shows the date of the crash.
 - No fan control, no memory timings, no process is closed. If the driver or its overclocking interface is missing,
   the page says so and nothing is written. AMD support is new in 1.15.0 Test 1.5 and has not yet been run on real
   Radeon cards: please report your card, driver version and what the page showed.
 
 ## Project status
 
-Released version: **1.15.0** (shipped with playbook 2.2.0, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)): signed self-update with a backup key, AMD Radeon overclocking, a notice when a new playbook is out. 227 automated tests run against a
-simulated Windows (`dotnet test tests/DomainScheduler.Tests`). Hardware coverage is narrow: please report
-your CPU, Windows build and before/after numbers in the issues.
+Released version: **1.16.0** (shipped with playbook 2.3.0, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)). New since 1.15.0:
+
+- **Updates and testing**: one page for the update check, rolling back to the previous version, the tester key and the update channel (they were in About and Settings).
+- **Dynamic Top-5 is the only thread mode**: the role plan is removed, in the owner's measurements it only made things worse.
+- **Devices**: instead of the big table, one line and an "Apply the layout" button; its confirmation lists which device gets which core. When the layout is already in place, there is nothing to apply.
+- **Burst guard** (Settings, on, soft mode): while a game is handled, a background program of your session that keeps using 0.3 of a processor or more for 6 s gets the smallest scheduling weight of a Job Object of its own: it is never stopped, it only gives way when the processors are busy (soft mode off: a hard cap of half a processor). Child processes break away, so a game started from it is never limited. Lifted when you switch to that program, when the game ends, Auto stops or Toolbox exits, and after a crash at the next start. Services, launchers, the shell, audio / voice / streaming / VR, network boosters, security software and anti-cheats are never touched. Only when free memory is low (under 10% of RAM or 1.5 GB) the game keeps its current memory as a hard minimum (at most 25% of RAM). On a clean PC it does nothing; after a game the log says what was limited.
+- **6 cores or fewer** (one cache domain, no E-cores): Auto gives the game every core and the device layout gives no device a core of its own. On a tester's i5-10400F the old mask cost 6% of the 1% low in CS2. 8 cores and more work as in 1.15.0. Setting `AutoMask` auto | on | off (`--auto-mask`), `--auto on|off|status` for scripted measurements.
+- Check page (one measured run), crash memory of the GPU overclock, own load per thread, shorter texts in Settings.
+
+Test builds are encrypted and live in a private repository that only the owner and invited testers can see. 261 automated tests run against a simulated Windows (`dotnet test tests/DomainScheduler.Tests`), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
 
 ## Build from source
 
@@ -232,5 +243,5 @@ carries it, so until then a leaked key could sign a fake feed. To shorten that w
 - **Zero Unflesh (zero_wake)** — co-owner of Domain OS and owner of AerialOS. Made a very large contribution to this project.
 
 ## License
-**Domain OS License** — all rights reserved (see [LICENSE](LICENSE)). You may read the code and use the official releases free of charge on your own PCs. Copying, re-uploading, publishing changed versions or builds based on this code, removing the author notices and selling are not allowed without the author's written permission. Versions published before 18 November 2026 under MIT stay MIT for the copies obtained then.
+**Domain OS License 2.0** — all rights reserved (see [LICENSE](LICENSE)). You may read the code and use the official releases free of charge, for personal non-commercial use, on your own PCs. Copying, re-uploading, publishing changed versions or builds based on this code, removing the author notices and selling are not allowed without the author's written permission. **"Domain OS", "Domain OS Toolbox" and the Domain OS logo identify the author's work: they may not be used for other playbooks, builds, tools, sites, servers or channels, and no other work may be presented as Domain OS or based on it.** Versions published before 18 November 2026 under MIT stay MIT for the copies obtained then.
 Windows is a trademark of Microsoft; this project ships no part of Windows.

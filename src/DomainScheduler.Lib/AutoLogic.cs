@@ -57,6 +57,29 @@ public static class AutoLogic
         return p;
     }
 
+    /// <summary>
+    /// 1.16.0-test1.7: on a processor with 6 cores or fewer (one cache domain, no E-cores) the game keeps every
+    /// processor; 8 cores and more keep the mask as before (owner's decision). Measurements (21.11.2026): a tester's
+    /// i5-10400F (6 cores) lost 6% of its 1% low with the mask; on a 7800X3D the mask made the game's main threads wait
+    /// for a core 11-49 times per 30 s in CS2 deathmatch. Setting "AutoMask": auto (this rule), on (always the mask),
+    /// off (never a mask).
+    /// </summary>
+    public const int SmallCpuCores = 6;
+
+    public static bool KeepsAllCores(Topo t, string setting)
+    {
+        setting = (setting ?? "").Trim().ToLowerInvariant();
+        if (setting == "off") return true;
+        if (setting == "on" || t == null) return false;
+        return !t.Hybrid && t.PhysicalCount > 0 && t.PhysicalCount <= SmallCpuCores && (t.LLCGroups?.Count ?? 1) <= 1;
+    }
+
+    public static MaskPlan AllCores(Topo t, MaskPlan mp)
+    {
+        if (mp == null || !mp.Satisfied || t == null) return mp;
+        return new MaskPlan { Spec = mp.Spec + " (all processors)", Resolved = mp.Resolved, Irq = mp.Irq, Mask = t.FullMask(), Satisfied = true };
+    }
+
     public sealed class MaskPlan
     {
         public string Spec = "";
