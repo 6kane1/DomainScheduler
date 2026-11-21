@@ -173,24 +173,83 @@ public sealed record UpdateCheck(UpdateFile Toolbox, UpdateFile Playbook, string
 
 /// <summary>
 /// The update check (1.15.0). It reads one or two small JSON files from the Domain OS site and nothing else is sent:
-/// no ID, no hardware, only a plain User-Agent with the version. Downloads are checked against their SHA-256 and size
-/// before anything uses them. Installing Toolbox is done by the app (it has to exit); the playbook is never installed
-/// here: its file is downloaded, checked and shown, AME Wizard installs it.
+/// no ID, no hardware, only a plain User-Agent with the version. Feeds are at most 1 MB and must carry a valid
+/// signature; a version must look like "1.15.0" or "1.15.0-test1.3" before it is used anywhere.
+/// Downloads (1.15.0 Test 1.3) go into memory and are checked there — size and SHA-256 of exactly the bytes that are
+/// then installed (a sealed test build is opened in memory too). Toolbox's new program file is written once, straight
+/// from those bytes, as the program file (nothing is read back from a folder another account could write to). A
+/// playbook is written once into a new folder with a random name inside the admin-only state folder (FileMode.CreateNew:
+/// an existing file is never reused). Installing Toolbox is done by the app (it has to exit); the playbook is never
+/// installed here: its file is downloaded, checked and shown, AME Wizard installs it.
 /// </summary>
 public static class Updater
 {
     public const string FeedBase = "https://6kane1.github.io/DomainOS/update/";
 
     /// <summary>
-    /// The public half of the Domain OS update key (ECDSA P-256). Every feed is signed with the private half, which
-    /// exists only on the author's PC; a feed without a valid signature is refused. The feed lists each file's SHA-256,
-    /// so the signature covers the downloads too: someone who takes over the site or the GitHub account still cannot
-    /// make Toolbox install anything.
+    /// The public half of the main Domain OS update key (ECDSA P-256). Every feed is signed with a private half, which
+    /// exists only with the author (the main key on the author's PC, the backup key offline); a feed without a valid
+    /// signature is refused. The feed lists each file's SHA-256, so the signature covers the downloads too: someone who
+    /// takes over the site or the GitHub account still cannot make Toolbox install anything.
     /// </summary>
     public const string PublicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENxIGlvWT392aI8r24XWshofv30+lyxs2sEMlNVslbKJh1UNZzJEu5Jx1h0EFzmnaNv1fGMBTHHU5mp/rz8gcWg==";
 
-    /// <summary>True when sigBase64 is a valid signature of exactly these bytes (DER ECDSA, SHA-256).</summary>
-    public static bool Verify(byte[] data, string sigBase64, string publicKey = PublicKey)
+    /// <summary>
+    /// The public half of the backup update key (ECDSA P-256, made 2026-11-19). Its private half is kept offline and is
+    /// used only when the main key leaks or is lost: the next feed is signed with it, and the Toolbox in that feed adds a
+    /// new backup key and moves the old main key to <see cref="RevokedKeyIds"/> (rotation steps: README, "Update keys").
+    /// </summary>
+    public const string BackupPublicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEqHD2RMemyHHX5CUG0TWCJfJEIkYzQClvrLb8rmC/BIO/oPJKJsxCoP5Dd4HwUAfdaj9jDeQIQcHPwUN1Qh84lw==";
+
+    /// <summary>One trusted update key: Id (see <see cref="KeyId"/>), a short name for the log, the public key (base64 SPKI DER).</summary>
+    public sealed record TrustedKey(string Id, string Name, string PublicKey);
+
+    /// <summary>
+    /// Every key a feed may be signed with: a feed is valid when its signature checks with ANY of them. The .sig file
+    /// stays what it always was (base64 DER ECDSA over SHA-256, no key id in it), so feeds signed for older Toolbox
+    /// versions, which know only the main key, keep working, and the new code just tries each key in turn.
+    /// </summary>
+    public static readonly IReadOnlyList<TrustedKey> TrustedKeys = new[]
+    {
+        new TrustedKey("824da223f01c0905", "main", PublicKey),
+        new TrustedKey("a807a74083942dde", "backup", BackupPublicKey),
+    };
+
+    /// <summary>
+    /// Ids of keys that must never be trusted again (a leaked key goes here in the next Toolbox). Checked by the key's
+    /// own fingerprint, so a revoked key is refused even if it is still (or again) listed in <see cref="TrustedKeys"/>.
+    /// </summary>
+    public static readonly IReadOnlyCollection<string> RevokedKeyIds = Array.Empty<string>();
+
+    /// <summary>Key id: the first 16 hex digits (lower case) of SHA-256 over the public key's SPKI DER bytes; null for bad base64.</summary>
+    public static string KeyId(string publicKeyBase64)
+    {
+        try { return Convert.ToHexString(SHA256.HashData(Convert.FromBase64String(publicKeyBase64 ?? ""))).Substring(0, 16).ToLowerInvariant(); }
+        catch (FormatException) { return null; }
+    }
+
+    /// <summary>True when sigBase64 is a valid signature of exactly these bytes by one of the built-in trusted, not revoked keys.</summary>
+    public static bool Verify(byte[] data, string sigBase64) => VerifyAny(data, sigBase64, TrustedKeys, RevokedKeyIds) != null;
+
+    /// <summary>
+    /// The trusted key that signed these bytes, or null when none did. A key whose fingerprint is in revoked is skipped
+    /// (the id listed next to a key is not trusted: the fingerprint is computed from the key itself).
+    /// </summary>
+    public static TrustedKey VerifyAny(byte[] data, string sigBase64, IEnumerable<TrustedKey> keys, IEnumerable<string> revoked)
+    {
+        if (data == null || string.IsNullOrWhiteSpace(sigBase64) || keys == null) return null;
+        var bad = new HashSet<string>(revoked ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+        foreach (var k in keys)
+        {
+            string id = k == null ? null : KeyId(k.PublicKey);
+            if (id == null || bad.Contains(id)) continue;
+            if (Verify(data, sigBase64, k.PublicKey)) return k;
+        }
+        return null;
+    }
+
+    /// <summary>True when sigBase64 is a valid signature of exactly these bytes with this one public key (DER ECDSA, SHA-256).</summary>
+    public static bool Verify(byte[] data, string sigBase64, string publicKey)
     {
         try
         {
@@ -201,7 +260,16 @@ public static class Updater
         catch (Exception) { return false; }
     }
 
-    public static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Domain OS", "Updates");
+    /// <summary>Downloads: a folder in the admin-only state folder.</summary>
+    public static string Dir => Path.Combine(Store.Dir, "Updates");
+
+    /// <summary>"1.15.0" or "1.15.0-test1.3": the only version texts used (in names, in the log, in comparisons).</summary>
+    public static readonly System.Text.RegularExpressions.Regex VersionRx = new(@"^\d+\.\d+\.\d+(-test\d+(\.\d+)*)?$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>A feed or its signature larger than this is refused.</summary>
+    public const long MaxFeedBytes = 1 << 20;
+    /// <summary>A download larger than this is refused (Toolbox is far smaller).</summary>
+    public const long MaxDownloadBytes = 512L << 20;
 
     /// <summary>The playbook version applied last on this PC (history.log written by the playbook), null when none.</summary>
     public static string InstalledPlaybook(string historyFile = null)
@@ -234,8 +302,9 @@ public static class Updater
             long size = e.TryGetProperty("size", out var z) && z.ValueKind == JsonValueKind.Number ? z.GetInt64() : 0;
             bool sealedFile = e.TryGetProperty("sealed", out var se) && se.ValueKind == JsonValueKind.True;
             var f = new UpdateFile(S("version"), S("url"), S("sha256")?.ToLowerInvariant(), size, S("notes_en") ?? "", S("notes_ru") ?? "", sealedFile);
-            bool ok = UpdateVersion.Parse(f.Version) != null && f.Url != null && f.Url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
-                      && f.Sha256 is { Length: 64 } && f.Size > 0;
+            bool ok = f.Version != null && VersionRx.IsMatch(f.Version) && UpdateVersion.Parse(f.Version) != null
+                      && f.Url != null && f.Url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+                      && f.Sha256 is { Length: 64 } && f.Sha256.All(Uri.IsHexDigit) && f.Size > 0 && f.Size <= MaxDownloadBytes;
             return ok ? f : null;
         }
     }
@@ -258,7 +327,8 @@ public static class Updater
 
     static HttpClient Client(TimeSpan timeout)
     {
-        var c = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true }) { Timeout = timeout };
+        // MaxResponseContentBufferSize caps every buffered read (feeds, signatures); downloads are streamed and capped by their size.
+        var c = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true }) { Timeout = timeout, MaxResponseContentBufferSize = MaxFeedBytes };
         c.DefaultRequestHeaders.UserAgent.ParseAdd("DomainOS-Toolbox/" + AppVersion.Full.Replace('+', '.'));
         return c;
     }
@@ -330,75 +400,145 @@ public static class Updater
         return Convert.ToHexString(SHA256.HashData(s)).ToLowerInvariant();
     }
 
-    /// <summary>Downloads to Dir and checks size and SHA-256. Returns the checked file; a bad file is deleted and an error thrown.</summary>
-    public static async Task<string> DownloadAsync(UpdateFile f, string fileName, IProgress<double> progress = null, CancellationToken ct = default)
+    public static string Sha256(byte[] data) => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+
+    /// <summary>
+    /// Downloads into memory and checks size and SHA-256 of those bytes; a sealed file is opened with the tester key,
+    /// also in memory. Returns the checked (and opened) bytes — exactly what the caller writes. Throws on any mismatch.
+    /// Progress is reported only when the whole percent changes.
+    /// </summary>
+    public static async Task<byte[]> DownloadBytesAsync(UpdateFile f, IProgress<double> progress = null, CancellationToken ct = default)
     {
-        Directory.CreateDirectory(Dir);
-        string final = Path.Combine(Dir, fileName), part = final + ".part";
-        if (!f.Sealed && File.Exists(final) && new FileInfo(final).Length == f.Size && Sha256(final) == f.Sha256) return final;
+        if (f == null || f.Size <= 0 || f.Size > MaxDownloadBytes) throw new InvalidDataException("The update entry has no valid size.");
         using var http = Client(TimeSpan.FromMinutes(30));
+        byte[] buf = new byte[f.Size];
         using (var resp = await http.GetAsync(f.Url, HttpCompletionOption.ResponseHeadersRead, ct))
         {
             resp.EnsureSuccessStatusCode();
+            if (resp.Content.Headers.ContentLength is long cl && cl != f.Size) throw new InvalidDataException("The file is not the size the update says.");
             await using var src = await resp.Content.ReadAsStreamAsync(ct);
-            await using var dst = File.Create(part);
-            var buf = new byte[1 << 16]; long got = 0; int n;
-            while ((n = await src.ReadAsync(buf, ct)) > 0)
-            {
-                await dst.WriteAsync(buf.AsMemory(0, n), ct);
-                got += n;
-                if (got > f.Size) throw new InvalidDataException("The file is larger than the update says.");
-                progress?.Report((double)got / f.Size);
-            }
+            await ReadAll(src, buf, progress, ct);
         }
-        long len = new FileInfo(part).Length;
-        string sum = Sha256(part);
-        if (len != f.Size || sum != f.Sha256)
+        return Check(buf, f);
+    }
+
+    /// <summary>Reads exactly buf.Length bytes; more data than that is refused.</summary>
+    internal static async Task ReadAll(Stream src, byte[] buf, IProgress<double> progress, CancellationToken ct)
+    {
+        int got = 0, shown = -1;
+        while (got < buf.Length)
         {
-            try { File.Delete(part); } catch (Exception) { }
-            throw new InvalidDataException($"The downloaded file does not match (size {len}, SHA-256 {sum[..12]}…): it was deleted and nothing was changed.");
+            int n = await src.ReadAsync(buf.AsMemory(got, buf.Length - got), ct);
+            if (n == 0) throw new InvalidDataException($"The download ended early ({got} of {buf.Length} bytes): nothing was changed.");
+            got += n;
+            int pct = (int)(got * 100L / buf.Length);
+            if (pct != shown) { shown = pct; progress?.Report(pct / 100.0); }
         }
-        if (File.Exists(final)) File.Delete(final);
-        if (f.Sealed)
+        var one = new byte[1];
+        if (await src.ReadAsync(one, ct) > 0) throw new InvalidDataException("The file is larger than the update says.");
+    }
+
+    /// <summary>Size and SHA-256 of these exact bytes, then (sealed) the tester key opens them in memory.</summary>
+    internal static byte[] Check(byte[] data, UpdateFile f)
+    {
+        string sum = Sha256(data);
+        if (data.LongLength != f.Size || !string.Equals(sum, f.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"The downloaded file does not match (size {data.LongLength}, SHA-256 {sum[..12]}…): nothing was changed.");
+        if (!f.Sealed) return data;
+        byte[] key = TesterKey.Current() ?? throw new InvalidDataException(KeyRefused);
+        try { return TesterKey.Open(data, key); }
+        catch (CryptographicException) { throw new InvalidDataException(KeyRefused); }
+    }
+
+    /// <summary>A plain file name (no folder, no ".." and nothing but letters, digits, dot, dash and underscore).</summary>
+    public static bool SafeFileName(string name) =>
+        !string.IsNullOrEmpty(name) && name.Length <= 100 && name.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_') && !name.StartsWith('.') && !name.Contains("..");
+
+    /// <summary>
+    /// Writes checked bytes once into a new folder with a random name under dir (the downloads folder): the folder and
+    /// the file are created new (an existing one is never reused), the file is opened without sharing while it is
+    /// written. Older download folders are removed first. Returns the file.
+    /// </summary>
+    public static string WriteNew(byte[] data, string fileName, string dir = null)
+    {
+        if (!SafeFileName(fileName)) throw new InvalidDataException("Not a plain file name: " + fileName);
+        dir ??= Dir;
+        Directory.CreateDirectory(dir);
+        foreach (var old in Directory.GetDirectories(dir)) { try { Directory.Delete(old, true); } catch (Exception) { } }
+        foreach (var old in Directory.GetFiles(dir)) { try { File.Delete(old); } catch (Exception) { } }
+        string sub = Path.Combine(dir, Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant());
+        if (Directory.Exists(sub) || File.Exists(sub)) throw new IOException("The download folder already exists: " + sub);
+        Directory.CreateDirectory(sub);
+        string path = Path.Combine(sub, fileName);
+        using (var fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
         {
-            byte[] key = TesterKey.Current() ?? throw new InvalidDataException(KeyRefused);
-            byte[] plain;
-            try { plain = TesterKey.Open(File.ReadAllBytes(part), key); }
-            catch (CryptographicException) { throw new InvalidDataException(KeyRefused); }
-            finally { try { File.Delete(part); } catch (Exception) { } }
-            File.WriteAllBytes(final, plain);
-            return final;
+            fs.Write(data);
+            fs.Flush(true);
         }
-        File.Move(part, final);
-        return final;
+        return path;
+    }
+
+    /// <summary>Test hook for the pauses between retries.</summary>
+    public static Action<int> RetrySleep = Thread.Sleep;
+
+    /// <summary>A file operation tried up to five times (an antivirus scan can hold a fresh exe for a moment).</summary>
+    static void Retry(Action a)
+    {
+        for (int i = 0, wait = 200; ; i++, wait *= 2)
+        {
+            try { a(); return; }
+            catch (Exception) when (i < 4) { RetrySleep(wait); }
+        }
     }
 
     /// <summary>
-    /// Swaps the program file: the running exe is renamed to "&lt;exe&gt;.prev" (Windows allows renaming a running
-    /// program) and the checked new file takes its name. On any failure the old file is put back.
+    /// Installs the new program file: the running exe is renamed to "&lt;exe&gt;.prev" (Windows allows renaming a
+    /// running program) and the checked bytes are written as the exe, created new and unshared while written. On any
+    /// failure the old file is put back.
     /// </summary>
-    public static void Swap(string exe, string newFile)
+    public static void Swap(string exe, byte[] content)
     {
+        if (content == null || content.Length == 0) throw new InvalidDataException("No program file to install.");
         string prev = exe + ".prev";
-        if (File.Exists(prev)) File.Delete(prev);
-        File.Move(exe, prev);
-        try { File.Copy(newFile, exe, overwrite: false); }
+        if (File.Exists(prev)) Retry(() => File.Delete(prev));
+        Retry(() => File.Move(exe, prev));
+        try
+        {
+            using var fs = new FileStream(exe, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            fs.Write(content);
+            fs.Flush(true);
+        }
         catch (Exception)
         {
             try { if (File.Exists(exe)) File.Delete(exe); } catch (Exception) { }
-            File.Move(prev, exe);
+            Retry(() => File.Move(prev, exe));
             throw;
         }
     }
 
-    /// <summary>Puts the previous program file back (after a failed start of the new one).</summary>
-    public static void SwapBack(string exe)
+    /// <summary>
+    /// Puts the previous program file back (after a failed start of the new one). The program file is never left
+    /// missing: each move is retried, and if the previous file cannot take its place the new one goes back.
+    /// </summary>
+    public static void SwapBack(string exe) => Exchange(exe, exe + ".prev", exe + ".bad");
+
+    /// <summary>"Return to the previous version": the previous file becomes the program, the current one "&lt;exe&gt;.next".</summary>
+    public static void SwapToPrevious(string exe) => Exchange(exe, exe + ".prev", exe + ".next");
+
+    /// <summary>The previous version did not start after a return to it: the newer one comes back, the previous is kept as ".prev".</summary>
+    public static void UndoSwapToPrevious(string exe) => Exchange(exe, exe + ".next", exe + ".prev");
+
+    /// <summary>The exe is moved to park, the file in from takes its place; on failure the exe comes back from park.</summary>
+    static void Exchange(string exe, string from, string park)
     {
-        string prev = exe + ".prev";
-        if (!File.Exists(prev)) throw new FileNotFoundException("There is no previous version to return to.", prev);
-        string bad = exe + ".bad";
-        if (File.Exists(bad)) File.Delete(bad);
-        if (File.Exists(exe)) File.Move(exe, bad);
-        File.Move(prev, exe);
+        if (!File.Exists(from)) throw new FileNotFoundException("There is no other version to switch to.", from);
+        if (File.Exists(park)) Retry(() => File.Delete(park));
+        if (File.Exists(exe)) Retry(() => File.Move(exe, park));
+        try { Retry(() => File.Move(from, exe)); }
+        catch (Exception)
+        {
+            if (!File.Exists(exe) && File.Exists(park)) Retry(() => File.Move(park, exe));
+            throw;
+        }
     }
 }

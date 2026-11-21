@@ -32,13 +32,68 @@ public partial class App : Application
 
 	private int _shutdown;
 
+	/// <summary>Started by an update (not the rolled-back one): its clean exit tells the old version all is well.</summary>
+	private bool _afterUpdate;
+
+	/// <summary>
+	/// Before anything reads its state (1.15.0 Test 1.3): the admin-only state folder is checked (and made safe),
+	/// an older version's data in the user's own folder is taken over once (only what passes the checks), and the
+	/// settings that moved to HKLM are copied over once. Everything is logged; nothing here stops the start.
+	/// </summary>
+	private static void PrepareState()
+	{
+		try
+		{
+			_ = Store.Dir;
+		}
+		catch (Exception ex)
+		{
+			AppLog.Add(ex.Message, AppLog.Sev.Error);
+		}
+		foreach (string note in StateDir.TakeNotes())
+		{
+			AppLog.Add(note, AppLog.Sev.Warn);
+		}
+		string account = "";
+		try
+		{
+			account = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? "";
+		}
+		catch (Exception)
+		{
+		}
+		try
+		{
+			foreach (var (text, sev) in LegacyImport.Run(Store.LegacyDir, account))
+			{
+				AppLog.Add(text, sev);
+			}
+		}
+		catch (Exception ex2)
+		{
+			AppLog.Add(L.F("Taking over the data of the older version: {0}", ex2.Message), AppLog.Sev.Error);
+		}
+		try
+		{
+			foreach (string line in RegistrySettingsBackend.MigrateToMachine(account.Length > 0 ? account : Environment.UserName))
+			{
+				AppLog.Add(line, AppLog.Sev.Warn);
+			}
+		}
+		catch (Exception ex3)
+		{
+			AppLog.Add(L.F("Settings migration: {0}", ex3.Message), AppLog.Sev.Warn);
+		}
+	}
+
 	protected override void OnStartup(StartupEventArgs e)
 	{
 		base.OnStartup(e);
+		L.Load(Settings.Language());
+		PrepareState();
 		if (e.Args.Contains("--revert-devices"))
 		{
 			// Without the window and without the single-instance check: usable from Safe Mode or a script.
-			L.Load(Settings.Language());
 			string err;
 			try
 			{
@@ -97,7 +152,9 @@ public partial class App : Application
 		L.Load(Settings.Language());
 		Theme.Apply(this);
 		// From here on every error is shown in a window (there is no on-screen journal).
-		_errors = new ErrorPopup(base.Dispatcher, () => _hub.Auto?.State == AutoState.Active, () => _window, t => _tray?.Notice(t));
+		// "A game runs": Auto has it active, or the last game it laid out still runs (after an error reverted
+		// everything, the window must not open over that game either).
+		_errors = new ErrorPopup(base.Dispatcher, () => _hub.Auto != null && (_hub.Auto.State == AutoState.Active || _hub.Auto.LastGameRunning), () => _window, t => _tray?.Notice(t));
 		Engine engine = new Engine(new WinNative());
 		engine.GateHook = (uint pid, string exe) => Guard.Gate(exe, Guard.Op.Process, isProtected: false, engine.ProcessesNow().Values.Select(((string Name, uint Parent) v) => v.Name));
 		_hub.Engine = engine;
@@ -193,7 +250,7 @@ public partial class App : Application
 		_hub.Auto.Changed += delegate
 		{
 			base.Dispatcher.BeginInvoke(new Action(_window.Refresh));
-			base.Dispatcher.BeginInvoke(new Action(() => UpdateService.Instance?.Poke()));
+			base.Dispatcher.BeginInvoke(new Action(() => UpdateService.Instance?.Poke()));   // redraws the cards only when a game started or ended
 		};
 		_hub.Opt.Start();
 		_tray = new Tray(ShowWindow, ExitApp);
@@ -202,12 +259,29 @@ public partial class App : Application
 		_showEvent = new EventWaitHandle(initialState: false, EventResetMode.AutoReset, "Local\\DomainScheduler.Show");
 		Thread thread = new Thread((ThreadStart)delegate
 		{
-			while (_showEvent.WaitOne())
+			while (true)
 			{
-				if (Volatile.Read(ref _shutdown) == 0)
+				EventWaitHandle ev = Volatile.Read(ref _showEvent);
+				if (ev == null)
 				{
-					base.Dispatcher.BeginInvoke(new Action(ShowWindow));
+					break;
 				}
+				try
+				{
+					if (!ev.WaitOne())
+					{
+						break;
+					}
+				}
+				catch (ObjectDisposedException)
+				{
+					break;
+				}
+				if (Volatile.Read(ref _shutdown) != 0)
+				{
+					break;
+				}
+				base.Dispatcher.BeginInvoke(new Action(ShowWindow));
 			}
 		});
 		thread.IsBackground = true;
@@ -218,6 +292,12 @@ public partial class App : Application
 			ShowWindow();
 		}
 		AppLog.Add(L.F("Started, CPU: {0}", Native.CpuName()));
+		// Unpacked libraries of other builds (an update leaves the old ones): removed once the window's are in use.
+		System.Threading.Tasks.Task.Run(async () =>
+		{
+			await System.Threading.Tasks.Task.Delay(TimeSpan.FromMinutes(1));
+			NativeHome.CleanOld();
+		});
 	}
 
 	/// <summary>
@@ -327,14 +407,44 @@ public partial class App : Application
 		}
 		try
 		{
-			_hub.Opt?.RunNow(delegate
+			bool finished = _hub.Opt?.RunNow(delegate
 			{
 				_hub.Auto.RevertEverything(L.T("Exit"));
-			});
+			}) ?? true;
+			if (!finished)
+			{
+				// The session file is then not marked clean: the next start puts back whatever is left.
+				AppLog.Add(L.T("Revert at exit did not finish in time: what is left is put back at the next start"), AppLog.Sev.Warn);
+			}
 		}
 		catch (Exception ex)
 		{
 			AppLog.Add(L.F("Revert at exit: {0}", ex.Message), AppLog.Sev.Error);
+		}
+		// The show event goes now: a new version starting after this one gets the "show the window" signal itself.
+		EventWaitHandle show = Interlocked.Exchange(ref _showEvent, null);
+		if (show != null)
+		{
+			try
+			{
+				show.Set();
+			}
+			catch (Exception)
+			{
+			}
+			show.Dispose();
+		}
+		// A version started by an update that closes cleanly (the user chose Exit) is not a failed update.
+		if (_afterUpdate)
+		{
+			try
+			{
+				using EventWaitHandle ok = EventWaitHandle.OpenExisting(UpdateOkName);
+				ok.Set();
+			}
+			catch (Exception)
+			{
+			}
 		}
 		_hub.Opt?.Dispose();
 		_hub.Frames?.Dispose();
@@ -350,32 +460,58 @@ public partial class App : Application
 	private const string UpdateOkName = "Local\\DomainScheduler.UpdateOk";
 
 	/// <summary>
-	/// Installs a downloaded and checked Toolbox (1.15.0): the program file is swapped (the running one becomes
-	/// "DomainScheduler.exe.prev"), everything is put back as on exit, and the new version is started. The new one
-	/// signals when it runs fine (after 20 s); if it closes before that, the previous file is put back and started again. Never called while a game is running (the card refuses it).
+	/// Installs a downloaded and checked Toolbox (1.15.0): everything is put back as on exit first; only then the
+	/// program file is swapped (the running one becomes "DomainScheduler.exe.prev", the checked bytes are written as the
+	/// program file) and the new version is started. The new one signals when it runs fine (after 20 s, or when it is
+	/// closed cleanly before that); if it ends with an error before that, the previous file is put back and started
+	/// again. Never called while a game is running (the card refuses it).
 	/// </summary>
-	public void InstallUpdate(string file, string version, Action<string> failed)
+	public void InstallUpdate(byte[] content, string version, Action<string> failed)
 	{
 		string exe = Environment.ProcessPath ?? "";
-		try
+		Handover(() => Updater.Swap(exe, content), () => Updater.SwapBack(exe), version, failed);
+	}
+
+	/// <summary>"Return to the previous version" on the About page: the ".prev" file is swapped in directly (nothing is copied anywhere).</summary>
+	public void RollBack()
+	{
+		string exe = Environment.ProcessPath ?? "";
+		if (!File.Exists(exe + ".prev"))
 		{
-			Updater.Swap(exe, file);
-		}
-		catch (Exception ex)
-		{
-			AppLog.Add(L.F("Update: the program file could not be replaced: {0}", ex.Message), AppLog.Sev.Warn);
-			failed(L.F("The program file could not be replaced: {0}. Nothing was changed.", ex.Message));
 			return;
 		}
+		Handover(() => Updater.SwapToPrevious(exe), () => Updater.UndoSwapToPrevious(exe), "previous", delegate(string err)
+		{
+			AppLog.Add(err, AppLog.Sev.Warn);
+		});
+	}
+
+	private void Handover(Action swap, Action swapBack, string version, Action<string> failed)
+	{
+		string exe = Environment.ProcessPath ?? "";
 		string from = AppVersion.Full;
-		AppLog.Add(L.F("Update: {0} → {1}, starting the new version", from, version));
-		Settings.Set("UpdateFrom", from);
 		if (!CleanUp())
 		{
 			return;
 		}
+		try
+		{
+			swap();
+		}
+		catch (Exception ex)
+		{
+			// Everything was already put back and stopped: the same version starts again (no change on disk).
+			AppLog.Add(L.F("Update: the program file could not be replaced: {0}", ex.Message), AppLog.Sev.Warn);
+			failed(L.F("The program file could not be replaced: {0}. Nothing was changed.", ex.Message));
+			RestartSame(exe);
+			return;
+		}
+		AppLog.Add(L.F("Update: {0} → {1}, starting the new version", from, version));
+		Settings.Set("UpdateFrom", from);
+		AppLog.Flush();
 		_window?.Hide();
 		EventWaitHandle ok = new EventWaitHandle(initialState: false, EventResetMode.ManualReset, UpdateOkName);
+		ok.Reset();      // an event left signalled by an earlier hand-over must not count for this one
 		try
 		{
 			_mutex?.ReleaseMutex();
@@ -395,6 +531,8 @@ public partial class App : Application
 					good = ok.WaitOne(500);
 					if (!good && p != null && p.HasExited)
 					{
+						// A clean exit (code 0) is the user closing it, or a second copy handing over: not a failed start.
+						good = ok.WaitOne(0) || p.ExitCode == 0;
 						break;
 					}
 				}
@@ -404,7 +542,7 @@ public partial class App : Application
 				AppLog.Add(L.F("Update: the new version did not start: {0}", ex2.Message), AppLog.Sev.Warn);
 			}
 			// Still running after 90 s without the signal: it is left alone (nothing in Toolbox ends a process) and
-			// counts as started. Only a new version that closed by itself is replaced with the previous one.
+			// counts as started. Only a new version that ended with an error is replaced with the previous one.
 			if (!good && p != null && !p.HasExited)
 			{
 				good = true;
@@ -414,7 +552,7 @@ public partial class App : Application
 			{
 				try
 				{
-					Updater.SwapBack(exe);
+					swapBack();
 					AppLog.Add(L.F("Update: {0} did not start, the previous version was put back", version), AppLog.Sev.Warn);
 					AppLog.Flush();
 					Process.Start(new ProcessStartInfo(exe, "--after-update --rolled-back") { UseShellExecute = false });
@@ -432,27 +570,26 @@ public partial class App : Application
 		thread.Start();
 	}
 
-	/// <summary>"Return to the previous version" on the About page: the same swap, backwards.</summary>
-	public void RollBack()
+	/// <summary>After a failed swap (everything already stopped): the unchanged program starts again and this copy closes.</summary>
+	private void RestartSame(string exe)
 	{
-		string exe = Environment.ProcessPath ?? "";
-		string prev = exe + ".prev";
-		if (!File.Exists(prev))
-		{
-			return;
-		}
-		string tmp = Path.Combine(Updater.Dir, "DomainScheduler-previous.exe");
 		try
 		{
-			Directory.CreateDirectory(Updater.Dir);
-			File.Copy(prev, tmp, overwrite: true);
+			_mutex?.ReleaseMutex();
+		}
+		catch (Exception)
+		{
+		}
+		try
+		{
+			AppLog.Flush();
+			Process.Start(new ProcessStartInfo(exe, "--after-update --update-failed") { UseShellExecute = false });
 		}
 		catch (Exception ex)
 		{
-			AppLog.Add(L.F("Rollback: {0}", ex.Message), AppLog.Sev.Warn);
-			return;
+			AppLog.Add(L.F("Update: {0}", ex.Message), AppLog.Sev.Error);
 		}
-		InstallUpdate(tmp, "previous", delegate (string err) { AppLog.Add(err, AppLog.Sev.Warn); });
+		base.Dispatcher.BeginInvoke(new Action(Shutdown));
 	}
 
 	/// <summary>Started by an update: tell the old version all is well (after 20 s of running), say what happened.</summary>
@@ -468,6 +605,12 @@ public partial class App : Application
 			_tray?.Info(L.T("The update did not start, so the previous version was put back. Nothing else changed."));
 			return;
 		}
+		if (args.Contains("--update-failed"))
+		{
+			_tray?.Info(L.T("The update could not be installed: the program file could not be replaced. Nothing was changed."));
+			return;
+		}
+		_afterUpdate = true;
 		DispatcherTimer t = new DispatcherTimer
 		{
 			Interval = TimeSpan.FromSeconds(20)

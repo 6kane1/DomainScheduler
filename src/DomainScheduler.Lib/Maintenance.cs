@@ -2,7 +2,7 @@ using Microsoft.Win32;
 
 namespace DomainScheduler;
 
-/// <summary>Factory reset / uninstall: the logon task, the settings and the data folder go away.</summary>
+/// <summary>Factory reset / uninstall: the logon task, the settings (HKCU and HKLM) and the data folders go away.</summary>
 public static class Maintenance
 {
     /// <summary>Restores a crashed session first (nothing may stay changed), then removes everything the program created.</summary>
@@ -18,7 +18,7 @@ public static class Maintenance
         try { log.AddRange(Tweaks.RevertRetired()); } catch (Exception e) { log.Add(e.Message); }
         try
         {
-            if (IrqAuto.HasBackup || File.Exists(Devices.BackupPath))
+            if (IrqAuto.HasBackup || Devices.HasBackup)
             {
                 string d = Devices.RevertAll();
                 log.Add(d == null ? L.T("Device interrupt changes reverted; restart Windows") : L.F("Devices: {0}", d));
@@ -30,12 +30,19 @@ public static class Maintenance
         try
         {
             Registry.CurrentUser.DeleteSubKeyTree(RegistrySettingsBackend.Root, false);
+            Registry.LocalMachine.DeleteSubKeyTree(RegistrySettingsBackend.MachineRoot, false);
             log.Add(L.T("Settings removed"));
         }
         catch (Exception e) { log.Add(L.F("Settings: {0}", e.Message)); }
         try
         {
-            if (Directory.Exists(Store.Dir)) Directory.Delete(Store.Dir, true);
+            // The state folder's contents; "native" holds the program's own unpacked libraries, in use while it runs.
+            string dir = Store.Dir;
+            foreach (var d in Directory.GetDirectories(dir).Where(d => !Path.GetFileName(d).Equals("native", StringComparison.OrdinalIgnoreCase)))
+                Directory.Delete(d, true);
+            foreach (var f in Directory.GetFiles(dir)) File.Delete(f);
+            // The user's folder of versions before 1.15.0 Test 1.3 (already taken over and renamed *.migrated).
+            if (Directory.Exists(Store.LegacyDir)) Directory.Delete(Store.LegacyDir, true);
             log.Add(L.T("Data folder removed"));
         }
         catch (Exception e) { log.Add(L.F("Data folder: {0}", e.Message)); }

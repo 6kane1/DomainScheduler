@@ -451,9 +451,9 @@ public static class IrqAuto
         try
         {
             int n = Math.Max(4 * Environment.ProcessorCount, 16);
-            var psi = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "wevtutil.exe"),
-                $"qe System /q:\"*[System[Provider[@Name='Microsoft-Windows-Kernel-Processor-Power'] and (EventID=55)]]\" /c:{n} /rd:true /f:xml")
-                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+            var psi = SysExe.Start("wevtutil.exe", redirect: false);
+            psi.RedirectStandardOutput = true;
+            psi.Arguments = $"qe System /q:\"*[System[Provider[@Name='Microsoft-Windows-Kernel-Processor-Power'] and (EventID=55)]]\" /c:{n} /rd:true /f:xml";
             using var p = System.Diagnostics.Process.Start(psi)!;
             string xml = p.StandardOutput.ReadToEnd();
             p.WaitForExit(10000);
@@ -522,10 +522,11 @@ public static class IrqAuto
         try
         {
             string script = "Get-NetAdapter -IncludeHidden -EA 0 | ForEach-Object { $r = Get-NetAdapterRss -Name $_.Name -EA 0; if ($r) { $_.PnPDeviceID + '|' + [int]$r.Enabled + '|' + $r.NumberOfReceiveQueues + '|' + $r.MaxProcessors } }";
-            var psi = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"),
-                "-NoProfile -NonInteractive -Command \"" + script + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+            // Windows' own NetAdapter module only (SysExe.PowerShell: no profile, system module path).
+            var psi = SysExe.PowerShell(script);
             using var p = System.Diagnostics.Process.Start(psi)!;
             var t = p.StandardOutput.ReadToEndAsync();
+            _ = p.StandardError.ReadToEndAsync();
             if (p.WaitForExit(10000))
                 foreach (var line in t.Result.Split('\n'))
                 {
@@ -559,24 +560,157 @@ public static class IrqAuto
         public uint[] UsbSuspend { get; set; }                           // AC, DC of the active plan, before
     }
 
-    static string BackupPath => Path.Combine(Store.Dir, "irq-auto-backup.json");
+    internal const string BackupName = "irq-auto-backup.json";
+    static string BackupPath => Path.Combine(Store.Dir, BackupName);
     static Backup _bk = new();
 
     static Backup Load()
     {
-        try { return File.Exists(BackupPath) ? JsonSerializer.Deserialize<Backup>(File.ReadAllText(BackupPath)) ?? new() : new(); }
+        try
+        {
+            if (!File.Exists(BackupPath)) return new();
+            var dropped = new List<string>();
+            var b = Clean(JsonSerializer.Deserialize<Backup>(File.ReadAllText(BackupPath)), dropped);
+            if (dropped.Count > 0) AppLog.Add(L.F("Device backup: entries that are not values the program writes were ignored: {0}", string.Join(", ", dropped.Take(5))), AppLog.Sev.Warn);
+            return b;
+        }
         catch (Exception) { return new(); }
+    }
+
+    // ---- what a backup may hold: exactly what this program (or an older version of it) writes ---------------
+
+    /// <summary>A device instance ID: ENUMERATOR\DEVICE\INSTANCE, nothing that could reach outside the device's key.</summary>
+    internal static readonly Regex InstanceRx = new(@"^[A-Za-z0-9_]{1,32}\\[A-Za-z0-9&_.#{}+\- ]{1,200}\\[A-Za-z0-9&_.#{}+\- ]{1,200}$", RegexOptions.CultureInvariant);
+    static readonly Regex DriverKeyRx = new(@"^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}\\\d{4}$", RegexOptions.CultureInvariant);
+    static readonly Regex ValueNameRx = new(@"^[A-Za-z0-9 _\-]{1,64}$", RegexOptions.CultureInvariant);
+    static readonly Regex WmiInstanceRx = new(@"^[A-Za-z0-9&_.#{}+\\\- ]{1,400}$", RegexOptions.CultureInvariant);
+    const string KernelKey = @"SYSTEM\CurrentControlSet\Control\Session Manager\Kernel";
+
+    static bool DWord(string enc, long lo, long hi) =>
+        enc.StartsWith("d:", StringComparison.Ordinal) && long.TryParse(enc[2..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out long v) && v >= lo && v <= hi;
+
+    static bool Bin(string enc, int maxBytes) =>
+        enc.StartsWith("b:", StringComparison.Ordinal) && enc.Length - 2 <= maxBytes * 2 && (enc.Length - 2) % 2 == 0 && enc.Skip(2).All(Uri.IsHexDigit);
+
+    static bool Digits(string enc, int maxLen) =>
+        enc.StartsWith("s:", StringComparison.Ordinal) && enc.Length > 2 && enc.Length - 2 <= maxLen && enc.Skip(2).All(char.IsAsciiDigit);
+
+    const long I32Min = int.MinValue, I32Max = int.MaxValue;
+
+    /// <summary>
+    /// The interrupt values of a device's Affinity Policy / MSI key: the names this program writes and puts back, each
+    /// in its registry type — a DWORD, or for the affinity mask a binary value of at most 64 bytes (pure; also used for
+    /// the manual device backup). The number itself is not limited: a backup holds whatever value the device had
+    /// before, and it has to come back as it was. "" = the value did not exist.
+    /// </summary>
+    internal static bool ValidIrqValue(string name, string enc)
+    {
+        enc ??= "";
+        if (enc.Length == 0) return name is "DevicePriority" or "DevicePolicy" or "AssignmentSetOverride" or "MSISupported" or "MessageNumberLimit";
+        return name switch
+        {
+            "DevicePriority" or "DevicePolicy" or "MSISupported" or "MessageNumberLimit" => DWord(enc, I32Min, I32Max),
+            "AssignmentSetOverride" => Bin(enc, 64),
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// Whether one backed-up entry ("HIVE|path|name" → encoded value) is something the automatic layout writes (pure):
+    /// the key (by its path: a device's interrupt keys, its Device Parameters, its driver's class key, the Kernel key,
+    /// the mouse key), the value name and the registry type. Everything else — another key, another value name,
+    /// another hive, another type, a text or binary value longer than the program ever wrote — is refused: the backup
+    /// is never trusted to say what to write with administrator rights.
+    /// </summary>
+    public static bool AllowedEntry(string id, string enc)
+    {
+        enc ??= "";
+        var f = (id ?? "").Split('|');
+        if (f.Length != 3) return false;
+        string hive = f[0], path = f[1], name = f[2];
+        if (hive == "HKCU") return path == @"Control Panel\Mouse" && name == "RawMouseThrottleDuration" && (enc == "" || DWord(enc, I32Min, I32Max) || Digits(enc, 10));
+        if (hive != "HKLM") return false;
+        if (path.Equals(KernelKey, StringComparison.OrdinalIgnoreCase))
+            return name == "ReservedCpuSets" && (enc == "" || Bin(enc, 64));
+        if (path.StartsWith(ClassRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!DriverKeyRx.IsMatch(path[ClassRoot.Length..])) return false;
+            if (name == "PnPCapabilities") return enc == "" || DWord(enc, I32Min, I32Max);
+            if (RssNames.Contains(name) || name == "*NumaNodeId") return enc == "" || DWord(enc, I32Min, I32Max) || Digits(enc, 10);
+            return false;
+        }
+        if (!path.StartsWith(EnumRoot, StringComparison.OrdinalIgnoreCase)) return false;
+        string rest = path[EnumRoot.Length..];
+        foreach (var (tail, check) in DeviceKeys)
+        {
+            if (!rest.EndsWith(tail, StringComparison.OrdinalIgnoreCase)) continue;
+            string inst = rest[..^tail.Length];
+            return InstanceRx.IsMatch(inst) && check(name, enc);
+        }
+        return false;
+    }
+
+    static readonly (string Tail, Func<string, string, bool> Check)[] DeviceKeys =
+    {
+        (ImSub + @"\Affinity Policy", (n, e) => n is "DevicePriority" or "DevicePolicy" or "AssignmentSetOverride" && ValidIrqValue(n, e)),
+        (ImSub + @"\MessageSignaledInterruptProperties", (n, e) => n is "MSISupported" or "MessageNumberLimit" && ValidIrqValue(n, e)),
+        // The legacy Priority subkey is deleted whole: "*" marks the key, its values are kept as they were (bounded).
+        (ImSub + @"\Priority", (n, e) => n == "*" ? e == "s:key" : ValueNameRx.IsMatch(n) && (e == "" || DWord(e, int.MinValue, int.MaxValue) || Bin(e, 64) || (e.StartsWith("s:", StringComparison.Ordinal) && e.Length <= 66 && !e.Any(char.IsControl)))),
+        (@"\Device Parameters", (n, e) => n is "SelectiveSuspendEnabled" or "EnhancedPowerManagementEnabled" && (e == "" || DWord(e, I32Min, I32Max) || Bin(e, 4))),
+    };
+
+    /// <summary>
+    /// The backup without anything <see cref="AllowedEntry"/> refuses (WMI switches: only device instance names; the
+    /// USB suspend pair: only 0/1). The refused entries are named in dropped (null: not collected).
+    /// </summary>
+    static Backup Clean(Backup b, List<string> dropped)
+    {
+        var c = new Backup();
+        if (b == null) return c;
+        foreach (var (id, enc) in b.Reg ?? new())
+            if (AllowedEntry(id, enc)) c.Reg[id] = enc;
+            else dropped?.Add(id);
+        foreach (var (inst, on) in b.Wmi ?? new())
+            if (WmiInstanceRx.IsMatch(inst ?? "")) c.Wmi[inst] = on;
+            else dropped?.Add("WMI " + inst);
+        if (b.UsbSuspend is { Length: 2 } u && u[0] <= 1 && u[1] <= 1) c.UsbSuspend = u;
+        else if (b.UsbSuspend != null) dropped?.Add("UsbSuspend");
+        return c;
+    }
+
+    /// <summary>
+    /// Takes over a backup file of an older version (from the user's folder): only the allowed entries, as JSON for
+    /// the state folder; null when nothing is left. The refused ones are named in dropped.
+    /// </summary>
+    internal static string ImportBackup(string json, string existing, List<string> dropped)
+    {
+        var b = Clean(JsonSerializer.Deserialize<Backup>(json), dropped);
+        // A backup already in the state folder wins: it holds the values from before the first change.
+        var cur = existing == null ? new Backup() : Clean(JsonSerializer.Deserialize<Backup>(existing), null);
+        foreach (var (k, v) in b.Reg) cur.Reg.TryAdd(k, v);
+        foreach (var (k, v) in b.Wmi) cur.Wmi.TryAdd(k, v);
+        cur.UsbSuspend ??= b.UsbSuspend;
+        return cur.Reg.Count == 0 && cur.Wmi.Count == 0 && cur.UsbSuspend == null ? null : JsonSerializer.Serialize(cur);
     }
 
     static void Save()
     {
-        Directory.CreateDirectory(Store.Dir);
-        File.WriteAllText(BackupPath, JsonSerializer.Serialize(_bk));
+        string path = BackupPath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(_bk));
+        File.Move(path + ".tmp", path, true);
     }
 
-    public static bool HasBackup => File.Exists(BackupPath);
+    public static bool HasBackup
+    {
+        get
+        {
+            try { return File.Exists(BackupPath); }
+            catch (Exception) { return false; }
+        }
+    }
 
-    static RegistryKey Root(string hive) => hive == "HKCU" ? Registry.CurrentUser : Registry.LocalMachine;
+    static RegistryKey Root(string hive) => hive switch { "HKLM" => Registry.LocalMachine, "HKCU" => Registry.CurrentUser, _ => throw new InvalidDataException("hive " + hive) };
 
     static string Enc(object v) => v switch
     {
@@ -814,6 +948,11 @@ public static class IrqAuto
 
     static void RestoreEntry(string id, string enc)
     {
+        if (!AllowedEntry(id, enc))
+        {
+            AppLog.Add(L.F("Device backup: {0} is not a value the program writes; it was not restored", id), AppLog.Sev.Warn);
+            return;
+        }
         var f = id.Split('|');
         if (enc == "")
         {
@@ -830,9 +969,9 @@ public static class IrqAuto
     /// <summary>Puts back everything the automatic layout changed (part of "Restore all devices").</summary>
     public static void RevertExtras()
     {
-        if (!File.Exists(BackupPath)) return;
-        _bk = Load();
-        foreach (var id in _bk.Reg.Keys.Where(k => k.EndsWith("|*")))
+        if (!HasBackup) return;
+        _bk = Load();      // only allowed entries (Clean)
+        foreach (var id in _bk.Reg.Keys.Where(k => k.EndsWith("|*") && k.StartsWith("HKLM|", StringComparison.Ordinal)))
             Registry.LocalMachine.CreateSubKey(id.Split('|')[1], true)?.Dispose();
         foreach (var (id, enc) in _bk.Reg.Where(kv => !kv.Key.EndsWith("|*")))
         {
@@ -911,7 +1050,7 @@ public static class IrqAuto
     public static List<string> CleanupLegacy(bool guessRawMouse)
     {
         var log = new List<string>();
-        if (File.Exists(BackupPath))
+        if (HasBackup)
         {
             _bk = Load();
             bool changed = false;
@@ -935,7 +1074,7 @@ public static class IrqAuto
                 if (!stor) continue;
                 try
                 {
-                    foreach (var id in g.Where(k => k.EndsWith("|*"))) Registry.LocalMachine.CreateSubKey(id.Split('|')[1], true)?.Dispose();
+                    foreach (var id in g.Where(k => k.EndsWith("|*") && k.StartsWith("HKLM|", StringComparison.Ordinal))) Registry.LocalMachine.CreateSubKey(id.Split('|')[1], true)?.Dispose();
                     foreach (var id in g.Where(k => !k.EndsWith("|*")).ToList()) RestoreEntry(id, _bk.Reg[id]);
                     foreach (var id in g.ToList()) _bk.Reg.Remove(id);
                     changed = true;

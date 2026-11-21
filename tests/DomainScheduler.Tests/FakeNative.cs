@@ -141,7 +141,8 @@ public sealed class FakeNative : INative
     public Dictionary<uint, List<uint>> ThreadsByPid() =>
         Threads.GroupBy(kv => kv.Value.Pid).Where(g => Procs.ContainsKey(g.Key)).ToDictionary(g => g.Key, g => g.Select(kv => kv.Key).OrderBy(x => x).ToList());
 
-    public Dictionary<uint, (string Name, uint Parent)> Processes() => Procs.ToDictionary(kv => kv.Key, kv => (kv.Value.Name, kv.Value.Parent));
+    public int ProcessLists;
+    public Dictionary<uint, (string Name, uint Parent)> Processes() { ProcessLists++; return Procs.ToDictionary(kv => kv.Key, kv => (kv.Value.Name, kv.Value.Parent)); }
 
     public int LastError() => _err;
 

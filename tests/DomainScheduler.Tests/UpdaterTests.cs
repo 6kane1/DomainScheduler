@@ -90,17 +90,17 @@ public class UpdaterTests
         Directory.CreateDirectory(d);
         try
         {
-            string exe = Path.Combine(d, "DomainScheduler.exe"), nw = Path.Combine(d, "new.exe");
-            File.WriteAllText(exe, "old"); File.WriteAllText(nw, "new");
-            Updater.Swap(exe, nw);
+            string exe = Path.Combine(d, "DomainScheduler.exe");
+            File.WriteAllText(exe, "old");
+            Updater.Swap(exe, System.Text.Encoding.UTF8.GetBytes("new"));
             Assert.Equal("new", File.ReadAllText(exe));
             Assert.Equal("old", File.ReadAllText(exe + ".prev"));
             Updater.SwapBack(exe);
             Assert.Equal("old", File.ReadAllText(exe));
             Assert.Equal("new", File.ReadAllText(exe + ".bad"));
             Assert.False(File.Exists(exe + ".prev"));
-            // a failing copy leaves the old file in place
-            Assert.ThrowsAny<Exception>(() => Updater.Swap(exe, Path.Combine(d, "missing.exe")));
+            // a failing install leaves the old file in place
+            Assert.ThrowsAny<Exception>(() => Updater.Swap(exe, Array.Empty<byte>()));
             Assert.Equal("old", File.ReadAllText(exe));
         }
         finally { Directory.Delete(d, true); }
@@ -145,6 +145,99 @@ public class UpdateSignatureTests
         string dir = Path.Combine(AppContext.BaseDirectory, "sigsample");
         Assert.True(File.Exists(Path.Combine(dir, "feed.json")));
         Assert.True(Updater.Verify(File.ReadAllBytes(Path.Combine(dir, "feed.json")), File.ReadAllText(Path.Combine(dir, "feed.json.sig"))));
+    }
+}
+
+/// <summary>Key rotation: a list of trusted keys (main + backup), any of them may sign, revoked ids are refused.
+/// Only throwaway keys made here are used to sign; the real keys never touch the tests.</summary>
+public class UpdateKeyRotationTests
+{
+    private static System.Security.Cryptography.ECDsa NewKey() => System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+    private static string Pub(System.Security.Cryptography.ECDsa k) => Convert.ToBase64String(k.ExportSubjectPublicKeyInfo());
+    private static string Sign(System.Security.Cryptography.ECDsa k, byte[] d) =>
+        Convert.ToBase64String(k.SignData(d, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.DSASignatureFormat.Rfc3279DerSequence));
+    private static Updater.TrustedKey T(string name, System.Security.Cryptography.ECDsa k) => new(Updater.KeyId(Pub(k)), name, Pub(k));
+
+    private static readonly byte[] Feed = System.Text.Encoding.UTF8.GetBytes("{\"toolbox\":{\"version\":\"9.9.9\"}}");
+
+    [Fact]
+    public void CurrentAndBackupKeyBothVerify()
+    {
+        using var main = NewKey(); using var backup = NewKey();
+        var keys = new[] { T("main", main), T("backup", backup) };
+        Assert.Equal("main", Updater.VerifyAny(Feed, Sign(main, Feed), keys, Array.Empty<string>())?.Name);
+        Assert.Equal("backup", Updater.VerifyAny(Feed, Sign(backup, Feed), keys, Array.Empty<string>())?.Name);
+    }
+
+    [Fact]
+    public void UnknownKeyIsRejected()
+    {
+        using var main = NewKey(); using var backup = NewKey(); using var stranger = NewKey();
+        var keys = new[] { T("main", main), T("backup", backup) };
+        Assert.Null(Updater.VerifyAny(Feed, Sign(stranger, Feed), keys, Array.Empty<string>()));
+        Assert.False(Updater.Verify(Feed, Sign(stranger, Feed)));      // nor by the built-in list
+    }
+
+    [Fact]
+    public void TamperedFeedIsRejected()
+    {
+        using var main = NewKey(); using var backup = NewKey();
+        var keys = new[] { T("main", main), T("backup", backup) };
+        foreach (var k in new[] { main, backup })
+        {
+            string sig = Sign(k, Feed);
+            byte[] changed = (byte[])Feed.Clone(); changed[^2] ^= 1;
+            Assert.Null(Updater.VerifyAny(changed, sig, keys, Array.Empty<string>()));
+            byte[] longer = Feed.Concat(new byte[] { (byte)' ' }).ToArray();
+            Assert.Null(Updater.VerifyAny(longer, sig, keys, Array.Empty<string>()));
+            byte[] rawSig = Convert.FromBase64String(sig); rawSig[^1] ^= 1;
+            Assert.Null(Updater.VerifyAny(Feed, Convert.ToBase64String(rawSig), keys, Array.Empty<string>()));
+        }
+        Assert.Null(Updater.VerifyAny(Feed, null, keys, Array.Empty<string>()));
+        Assert.Null(Updater.VerifyAny(Feed, "", keys, Array.Empty<string>()));
+        Assert.Null(Updater.VerifyAny(Feed, "not base64!", keys, Array.Empty<string>()));
+    }
+
+    [Fact]
+    public void RevokedKeyIsRejectedOthersStillWork()
+    {
+        using var main = NewKey(); using var backup = NewKey();
+        var keys = new[] { T("main", main), T("backup", backup) };
+        var revoked = new[] { Updater.KeyId(Pub(main)).ToUpperInvariant() };   // case does not matter
+        Assert.Null(Updater.VerifyAny(Feed, Sign(main, Feed), keys, revoked));
+        Assert.Equal("backup", Updater.VerifyAny(Feed, Sign(backup, Feed), keys, revoked)?.Name);
+        // the id written next to a key is not trusted: a revoked key listed under another id is still refused
+        var disguised = new[] { new Updater.TrustedKey("0000000000000000", "main", Pub(main)) };
+        Assert.Null(Updater.VerifyAny(Feed, Sign(main, Feed), disguised, revoked));
+    }
+
+    [Fact]
+    public void BuiltInKeyListIsConsistent()
+    {
+        Assert.Equal(Updater.PublicKey, Updater.TrustedKeys[0].PublicKey);
+        Assert.Contains(Updater.TrustedKeys, k => k.PublicKey == Updater.BackupPublicKey);
+        Assert.NotEqual(Updater.PublicKey, Updater.BackupPublicKey);
+        foreach (var k in Updater.TrustedKeys)
+        {
+            Assert.Equal(Updater.KeyId(k.PublicKey), k.Id);                 // ids are the real fingerprints
+            using var ec = System.Security.Cryptography.ECDsa.Create();
+            ec.ImportSubjectPublicKeyInfo(Convert.FromBase64String(k.PublicKey), out _);
+            Assert.Equal(256, ec.KeySize);
+            Assert.DoesNotContain(k.Id, Updater.RevokedKeyIds);
+        }
+        Assert.Equal(Updater.TrustedKeys.Count, Updater.TrustedKeys.Select(k => k.Id).Distinct().Count());
+    }
+
+    [Fact]
+    public void FeedSignedTodayStillVerifiesWithTheMainKey()
+    {
+        // the existing .sig format (openssl dgst -sha256 -sign, base64 DER) checks with the main key alone (old Toolbox) and the list (new)
+        string dir = Path.Combine(AppContext.BaseDirectory, "sigsample");
+        byte[] data = File.ReadAllBytes(Path.Combine(dir, "feed.json"));
+        string sig = File.ReadAllText(Path.Combine(dir, "feed.json.sig"));
+        Assert.True(Updater.Verify(data, sig, Updater.PublicKey));
+        Assert.Equal("main", Updater.VerifyAny(data, sig, Updater.TrustedKeys, Updater.RevokedKeyIds)?.Name);
+        Assert.Null(Updater.VerifyAny(data, sig, Updater.TrustedKeys, new[] { Updater.TrustedKeys[0].Id }));
     }
 }
 

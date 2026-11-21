@@ -66,7 +66,7 @@ internal sealed class ErrorPopup
 		}
 		if (items.Count > 8) sb.AppendLine(L.F("…and {0} earlier", items.Count - 8));
 		sb.AppendLine();
-		sb.Append(L.F("Details are in the log file: {0}", AppLog.FilePath));
+		sb.Append(L.F("Details are in the log file: {0}", AppLog.ShownPath));
 		_showing = true;
 		try
 		{

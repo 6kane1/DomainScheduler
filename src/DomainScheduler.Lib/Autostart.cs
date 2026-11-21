@@ -73,8 +73,10 @@ public sealed class SchtasksBackend : ITaskBackend
 {
     static (int code, string output) Run(string args)
     {
-        var psi = new ProcessStartInfo("schtasks.exe", args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        var psi = SysExe.Start("schtasks.exe");
+        psi.Arguments = args;
         using var p = Process.Start(psi)!;
+        var err = p.StandardError.ReadToEndAsync();
         string o = p.StandardOutput.ReadToEnd();
         p.WaitForExit(15000);
         return (p.HasExited ? p.ExitCode : -1, o);
@@ -88,10 +90,13 @@ public sealed class SchtasksBackend : ITaskBackend
 
     public void Register(string name, string xml)
     {
-        string tmp = Path.Combine(Path.GetTempPath(), "ds-task-" + Guid.NewGuid().ToString("N") + ".xml");
+        // The task definition is handed over in the admin-only state folder, not in %TEMP% (which any program of the
+        // user can write to: a definition swapped there before schtasks reads it would be registered with full rights).
+        string tmp = Path.Combine(Store.Dir, "task-" + Guid.NewGuid().ToString("N") + ".xml");
         try
         {
-            File.WriteAllText(tmp, xml, System.Text.Encoding.Unicode);
+            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var w = new StreamWriter(fs, System.Text.Encoding.Unicode)) w.Write(xml);
             var (code, output) = Run($"/Create /TN \"{name}\" /XML \"{tmp}\" /F");
             if (code != 0) throw new InvalidOperationException("schtasks: " + output.Trim());
         }

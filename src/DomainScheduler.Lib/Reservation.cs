@@ -45,7 +45,7 @@ public static class Reservation
     public static IReservedRegistry Reg = new WinReservedRegistry();
     public static Func<DateTime> BootUtc = () => DateTime.UtcNow - TimeSpan.FromMilliseconds(Native.GetTickCount64());
     public static Func<string> BackupPathHook;
-    public static string BackupPath => BackupPathHook?.Invoke() ?? Path.Combine(Store.Dir, "reserved-cpusets.bak");
+    public static string BackupPath => BackupPathHook?.Invoke() ?? Path.Combine(Store.Dir, BackupName);
 
     public sealed class State
     {
@@ -100,6 +100,27 @@ public static class Reservation
         if ((mask & sp.Game) != 0) r.Add(L.T("The mask holds game cores"));
         if (!CoreSplit.SmtWhole(t, mask)) r.Add(L.T("The mask takes only one hardware thread of a core"));
         return r;
+    }
+
+    internal const string BackupName = "reserved-cpusets.bak";
+
+    /// <summary>
+    /// The saved original may be written back (pure): "absent" or the bytes of a ReservedCpuSets value (1–32 bytes,
+    /// hex) — the value this program read before it reserved anything.
+    /// </summary>
+    public static bool ValidOriginal(string orig)
+    {
+        if (orig == "absent") return true;
+        return !string.IsNullOrEmpty(orig) && orig.Length <= 64 && orig.Length % 2 == 0 && orig.All(Uri.IsHexDigit);
+    }
+
+    /// <summary>Takes over the backup of an older version: the text when its original passes <see cref="ValidOriginal"/>, else null.</summary>
+    internal static string ImportBackup(string text, List<string> dropped)
+    {
+        string orig = (text ?? "").Trim().Split('|')[0];
+        if (ValidOriginal(orig)) return text.Trim();
+        dropped?.Add(orig.Length > 40 ? orig[..40] : orig);
+        return null;
     }
 
     static (bool ok, string original, DateTime backupAt, DateTime applied) ReadBackup()
@@ -179,6 +200,12 @@ public static class Reservation
         if (!ok) return L.T("No backup: the program did not reserve cores");
         try
         {
+            if (!ValidOriginal(orig))
+            {
+                // Not a value this program could have saved: Windows' default (no reservation) instead of the file's text.
+                AppLog.Add(L.T("Core reservation: the saved original is not a valid value; the reservation is removed instead"), AppLog.Sev.Warn);
+                orig = "absent";
+            }
             if (orig == "absent") Reg.Delete();
             else Reg.Write(Convert.FromHexString(orig));
             File.Delete(BackupPath);

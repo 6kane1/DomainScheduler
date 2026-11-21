@@ -40,7 +40,18 @@ public static class Devices
     public static Func<string, byte[]> ResourceHook;                  // instance id → raw IRQ resource descriptor data
     public static Func<string, IrqConfig> ReadHook;                   // instance id → registry values
 
-    public static string BackupPath => Path.Combine(Store.Dir, "irq-backup.json");
+    internal const string BackupName = "irq-backup.json";
+    public static string BackupPath => Path.Combine(Store.Dir, BackupName);
+
+    /// <summary>A backup file exists (false when the state folder cannot be used).</summary>
+    public static bool HasBackup
+    {
+        get
+        {
+            try { return File.Exists(BackupPath); }
+            catch (Exception) { return false; }
+        }
+    }
 
     const string EnumRoot = @"SYSTEM\CurrentControlSet\Enum\";
     const string PolicySub = @"\Device Parameters\Interrupt Management\Affinity Policy";
@@ -288,6 +299,43 @@ public static class Devices
         public Dictionary<string, Dictionary<string, string>> Devices { get; set; } = new();
     }
 
+    static readonly string[] BackedUpNames = { "AssignmentSetOverride", "DevicePolicy", "DevicePriority", "MSISupported", "MessageNumberLimit" };
+
+    /// <summary>
+    /// One device of the backup may be restored (pure): a PCI instance ID and, for every value, a name and range this
+    /// program writes (<see cref="IrqAuto.ValidIrqValue"/>).
+    /// </summary>
+    public static bool ValidBackupDevice(string pdo, Dictionary<string, string> vals) =>
+        pdo != null && pdo.StartsWith(@"PCI\", StringComparison.OrdinalIgnoreCase) && IrqAuto.InstanceRx.IsMatch(pdo) && vals != null
+        && vals.All(kv => BackedUpNames.Contains(kv.Key) && IrqAuto.ValidIrqValue(kv.Key, kv.Value ?? ""));
+
+    static Backup Clean(Backup b, List<string> dropped)
+    {
+        var c = new Backup();
+        foreach (var (pdo, vals) in b?.Devices ?? new())
+            if (ValidBackupDevice(pdo, vals)) c.Devices[pdo] = vals;
+            else dropped?.Add(pdo);
+        return c;
+    }
+
+    static Backup LoadBackup()
+    {
+        if (!File.Exists(BackupPath)) return new Backup();
+        var dropped = new List<string>();
+        var b = Clean(JsonSerializer.Deserialize<Backup>(File.ReadAllText(BackupPath)), dropped);
+        if (dropped.Count > 0) AppLog.Add(L.F("Device backup: entries that are not values the program writes were ignored: {0}", string.Join(", ", dropped.Take(5))), AppLog.Sev.Warn);
+        return b;
+    }
+
+    /// <summary>Takes over the manual device backup of an older version: only valid devices; null when none is left.</summary>
+    internal static string ImportBackup(string json, string existing, List<string> dropped)
+    {
+        var b = Clean(JsonSerializer.Deserialize<Backup>(json), dropped);
+        var cur = existing == null ? new Backup() : Clean(JsonSerializer.Deserialize<Backup>(existing), null);
+        foreach (var (k, v) in b.Devices) cur.Devices.TryAdd(k, v);
+        return cur.Devices.Count == 0 ? null : JsonSerializer.Serialize(cur);
+    }
+
     static string Enc(object v) => v switch
     {
         null => "",
@@ -325,7 +373,7 @@ public static class Devices
             try { BootGuard.MarkPending(); }
             catch (Exception e) { return L.F("Nothing was written: the safety marker could not be saved ({0})", e.Message); }
             // Backup of the original values (kept from the first change).
-            var bk = File.Exists(BackupPath) ? JsonSerializer.Deserialize<Backup>(File.ReadAllText(BackupPath)) ?? new Backup() : new Backup();
+            var bk = LoadBackup();
             if (!bk.Devices.ContainsKey(dev.Pdo))
             {
                 using var pk = Registry.LocalMachine.OpenSubKey(polPath);
@@ -339,7 +387,8 @@ public static class Devices
                     ["MessageNumberLimit"] = Enc(Value(mk, "MessageNumberLimit")),
                 };
                 Directory.CreateDirectory(Store.Dir);
-                File.WriteAllText(BackupPath, JsonSerializer.Serialize(bk));
+                File.WriteAllText(BackupPath + ".tmp", JsonSerializer.Serialize(bk));
+                File.Move(BackupPath + ".tmp", BackupPath, true);
             }
             using (var pk = Registry.LocalMachine.CreateSubKey(polPath, true))
             {
@@ -379,6 +428,11 @@ public static class Devices
 
     static void RestoreValues(string pdo, Dictionary<string, string> vals)
     {
+        if (!ValidBackupDevice(pdo, vals))
+        {
+            AppLog.Add(L.F("Device backup: {0} holds values the program does not write; it was not restored", pdo), AppLog.Sev.Warn);
+            return;
+        }
         using (var pk = Registry.LocalMachine.CreateSubKey(EnumRoot + pdo + PolicySub, true))
             foreach (var n in new[] { "AssignmentSetOverride", "DevicePolicy", "DevicePriority" })
                 SetOrDelete(pk, n, vals.GetValueOrDefault(n, ""));
@@ -394,10 +448,10 @@ public static class Devices
     public static string RevertAll()
     {
         try { IrqAuto.RevertExtras(); } catch (Exception) { }
-        if (!File.Exists(BackupPath)) { BootGuard.Clear(); return null; }
+        if (!HasBackup) { BootGuard.Clear(); return null; }
         try
         {
-            var bk = JsonSerializer.Deserialize<Backup>(File.ReadAllText(BackupPath)) ?? new Backup();
+            var bk = LoadBackup();
             var devs = List().ToDictionary(d => d.Pdo, StringComparer.OrdinalIgnoreCase);
             foreach (var (pdo, vals) in bk.Devices)
             {

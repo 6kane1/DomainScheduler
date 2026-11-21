@@ -8,7 +8,7 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
     <InvariantGlobalization>false</InvariantGlobalization>
-    <Version>1.15.0-test1.2</Version>
+    <Version>1.15.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Company>DomainScheduler</Company>
     <Product>DomainScheduler</Product>

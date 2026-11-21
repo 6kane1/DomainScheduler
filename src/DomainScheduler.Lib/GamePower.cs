@@ -12,12 +12,51 @@ namespace DomainScheduler;
 public static class GamePower
 {
     static readonly Guid SubProcessor = new("54533251-82be-4824-96c1-47b60b740d00");
-    static string File_ => Path.Combine(Store.Dir, "game-power.json");
+    internal const string FileName = "game-power.json";
+    static string File_ => Path.Combine(Store.Dir, FileName);
     static readonly object Gate = new();
 
     sealed class Saved { public Guid Scheme { get; set; } public Dictionary<string, uint> Values { get; set; } = new(); }
 
-    public static bool Applied => File.Exists(File_);
+    /// <summary>
+    /// The only settings those builds changed, with the range each one takes: processor idle disable (0/1) and the
+    /// two core parking minimums (percent). Anything else in the file is never written.
+    /// </summary>
+    static readonly Dictionary<Guid, uint> Managed = new()
+    {
+        [new Guid("5d76a2ca-e8c0-402f-a133-2158492d58ad")] = 1,
+        [new Guid("0cc5b647-c1df-4637-891a-dec35c318583")] = 100,
+        [new Guid("0cc5b647-c1df-4637-891a-dec35c318584")] = 100,
+    };
+
+    /// <summary>One saved value may be put back (pure): a managed setting and a value in its range.</summary>
+    public static bool ValidValue(string setting, uint value) =>
+        Guid.TryParse(setting, out var g) && Managed.TryGetValue(g, out uint max) && value <= max;
+
+    static Saved Clean(Saved s, List<string> dropped)
+    {
+        var c = new Saved { Scheme = s?.Scheme ?? Guid.Empty };
+        foreach (var (k, v) in s?.Values ?? new())
+            if (ValidValue(k, v)) c.Values[k] = v;
+            else dropped?.Add(k);
+        return c;
+    }
+
+    /// <summary>Takes over the file of an older version: only managed settings; null when nothing is left.</summary>
+    internal static string ImportFile(string json, List<string> dropped)
+    {
+        var c = Clean(JsonSerializer.Deserialize<Saved>(json), dropped);
+        return c.Scheme == Guid.Empty || c.Values.Count == 0 ? null : JsonSerializer.Serialize(c);
+    }
+
+    public static bool Applied
+    {
+        get
+        {
+            try { return File.Exists(File_); }
+            catch (Exception) { return false; }
+        }
+    }
 
     /// <summary>Puts the saved values back (left over from a test build or a crash); "" when there is nothing to do.</summary>
     public static string Restore()
@@ -26,8 +65,10 @@ public static class GamePower
         {
             if (!Applied) return "";
             Saved saved;
-            try { saved = JsonSerializer.Deserialize<Saved>(File.ReadAllText(File_)); }
+            var dropped = new List<string>();
+            try { saved = Clean(JsonSerializer.Deserialize<Saved>(File.ReadAllText(File_)), dropped); }
             catch (Exception) { try { File.Delete(File_); } catch (Exception) { } return ""; }
+            if (dropped.Count > 0) AppLog.Add(L.F("Power for the game: saved settings the program does not manage were ignored: {0}", string.Join(", ", dropped.Take(5))), AppLog.Sev.Warn);
             var scheme = saved.Scheme;
             foreach (var (k, v) in saved.Values)
             {

@@ -4,8 +4,10 @@ using System.Text;
 namespace DomainScheduler;
 
 /// <summary>
-/// The program log (section 25): a ring buffer of about 2000 entries in memory,
-/// flushed to a file on exit and on a crash. The Report reads from here.
+/// The program log (section 25): a ring buffer of about 2000 entries in memory (the Report reads from here) and the
+/// file log.txt in the state folder. A warning or an error is written to the file at once (it is there after a
+/// blue screen too); other entries go with it, or at the latest a minute later, and at exit. Each entry is written
+/// once: a flush appends only what came since the last one.
 /// </summary>
 public static class AppLog
 {
@@ -24,6 +26,16 @@ public static class AppLog
     public static Func<DateTime> Now = () => DateTime.UtcNow;
     public static Func<string> PathHook;
     public static string FilePath => PathHook?.Invoke() ?? Path.Combine(Store.Dir, "log.txt");
+    /// <summary>Where the file is, for display (never throws).</summary>
+    public static string ShownPath => PathHook?.Invoke() ?? Path.Combine(Store.DirShown, "log.txt");
+    /// <summary>Entries added since the last flush (not yet in the file).</summary>
+    static int _unwritten;
+    static DateTime _lastFlush = DateTime.MinValue;
+    static bool _headerDone;
+    static readonly object _fileGate = new();
+    public static readonly TimeSpan FlushEvery = TimeSpan.FromMinutes(1);
+    /// <summary>The file is written on Windows, and in tests only when PathHook points somewhere.</summary>
+    static bool FileOn => PathHook != null || OperatingSystem.IsWindows();
 
     static long _version;
     /// <summary>Grows with every entry (the log panel redraws only when it changed).</summary>
@@ -37,12 +49,16 @@ public static class AppLog
         if (string.IsNullOrEmpty(msg)) return;
         Interlocked.Increment(ref _version);
         Entry e = new Entry(Now(), sev, msg);
+        bool flush;
         lock (_gate)
         {
             _ring[_next] = e;
             _next = (_next + 1) % Capacity;
             if (_count < Capacity) _count++;
+            if (_unwritten < Capacity) _unwritten++;
+            flush = sev != Sev.Info || e.Utc - _lastFlush >= FlushEvery;
         }
+        if (flush) Flush();
         if (sev == Sev.Error)
         {
             try { ErrorAdded?.Invoke(e); } catch (Exception) { }
@@ -63,28 +79,43 @@ public static class AppLog
 
     public static void Clear()
     {
-        lock (_gate) _next = _count = 0;
+        lock (_gate) _next = _count = _unwritten = 0;
     }
 
-    /// <summary>Appends the buffer to the log file (exit, crash). Never throws.</summary>
+    /// <summary>Appends the entries that are not in the file yet (each one once). Never throws.</summary>
     public static void Flush()
     {
-        try
+        if (!FileOn) { lock (_gate) { _unwritten = 0; _lastFlush = Now(); } return; }
+        lock (_fileGate)
         {
-            var lines = Tail(Capacity).Select(e => e.Utc.ToString("o", CultureInfo.InvariantCulture) + " " + e.Sev + " " + e.Msg);
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            var sb = new StringBuilder();
-            sb.AppendLine("---- " + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
-            foreach (var l in lines) sb.AppendLine(l);
-            File.AppendAllText(FilePath, sb.ToString());
-            var fi = new FileInfo(FilePath);
-            if (fi.Length > 4 << 20)   // keep the file small: the last 2 MB
+            List<Entry> fresh;
+            lock (_gate)
             {
-                var all = File.ReadAllBytes(FilePath);
-                File.WriteAllBytes(FilePath, all[^(2 << 20)..]);
+                int n = Math.Min(_unwritten, _count);
+                fresh = new List<Entry>(n);
+                for (int i = n; i > 0; i--) fresh.Add(_ring[(_next - i + Capacity) % Capacity]);
+                _unwritten = 0;
+                _lastFlush = Now();
             }
+            if (fresh.Count == 0 && _headerDone) return;
+            try
+            {
+                string path = FilePath;
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                var sb = new StringBuilder();
+                if (!_headerDone) sb.AppendLine("---- " + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+                foreach (var e in fresh) sb.AppendLine(e.Utc.ToString("o", CultureInfo.InvariantCulture) + " " + e.Sev + " " + e.Msg);
+                File.AppendAllText(path, sb.ToString());
+                _headerDone = true;
+                var fi = new FileInfo(path);
+                if (fi.Length > 4 << 20)   // keep the file small: the last 2 MB
+                {
+                    var all = File.ReadAllBytes(path);
+                    File.WriteAllBytes(path, all[^(2 << 20)..]);
+                }
+            }
+            catch (Exception) { }
         }
-        catch (Exception) { }
     }
 
     /// <summary>Type, message and inner exceptions (an AggregateException is unpacked) plus the first stack frame of

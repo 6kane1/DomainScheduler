@@ -12,20 +12,33 @@ public interface ISettingsBackend
     IEnumerable<string> Names(string sub);
 }
 
-/// <summary>HKCU\Software\DomainScheduler (only strings).</summary>
+/// <summary>
+/// The settings in the registry (only strings). Two places (1.15.0 Test 1.3):
+///  - HKCU\Software\DomainScheduler: preferences of the window (language, position, charts, the watchlist…), which
+///    only change how the program looks or which games it may handle;
+///  - HKLM\SOFTWARE\Domain OS\Toolbox: the feature flags and every value that makes the program, with administrator
+///    rights, change something by itself at start (the GPU overclock at start, the one-shot device clean-ups).
+///    Only administrators can write there, so a program running without rights cannot switch them.
+/// <see cref="Settings.IsMachine"/> decides which goes where.
+/// </summary>
 public sealed class RegistrySettingsBackend : ISettingsBackend
 {
     public const string Root = @"Software\DomainScheduler";
     public const string LegacyRoot = @"Software\DomainScheduler.Legacy";
+    public const string MachineRoot = @"SOFTWARE\Domain OS\Toolbox";
 
     static string Path(string sub) => string.IsNullOrEmpty(sub) ? Root : Root + "\\" + sub;
+    static string MachinePath(string sub) => string.IsNullOrEmpty(sub) ? MachineRoot : MachineRoot + "\\" + sub;
+    static (RegistryKey Hive, string Path) Where(string sub, string name) =>
+        Settings.IsMachine(sub, name) ? (Registry.LocalMachine, MachinePath(sub)) : (Registry.CurrentUser, Path(sub));
 
     public bool TryGet(string sub, string name, out string value)
     {
         value = null;
         try
         {
-            using var k = Registry.CurrentUser.OpenSubKey(Path(sub));
+            var (hive, path) = Where(sub, name);
+            using var k = hive.OpenSubKey(path);
             object v = k?.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
             if (v == null) return false;
             value = Convert.ToString(v, CultureInfo.InvariantCulture) ?? "";
@@ -36,20 +49,54 @@ public sealed class RegistrySettingsBackend : ISettingsBackend
 
     public void Set(string sub, string name, string value)
     {
-        using var k = Registry.CurrentUser.CreateSubKey(Path(sub), true);
+        var (hive, path) = Where(sub, name);
+        using var k = hive.CreateSubKey(path, true);
         k.SetValue(name, value ?? "", RegistryValueKind.String);
     }
 
     public void Delete(string sub, string name)
     {
-        using var k = Registry.CurrentUser.OpenSubKey(Path(sub), true);
+        var (hive, path) = Where(sub, name);
+        using var k = hive.OpenSubKey(path, true);
         k?.DeleteValue(name, false);
     }
 
     public IEnumerable<string> Names(string sub)
     {
-        using var k = Registry.CurrentUser.OpenSubKey(Path(sub));
+        var (hive, path) = Where(sub, null);
+        using var k = hive.OpenSubKey(path);
         return k?.GetValueNames().ToList() ?? new List<string>();
+    }
+
+    /// <summary>
+    /// Once per Windows account: the values that moved to HKLM are copied over from this account's HKCU. Only known
+    /// names with a valid value (<see cref="Settings.MachineValueValid"/>) are taken, and only where HKLM has none yet;
+    /// the HKCU copies stay (an older version reads them) but are never read again. Returns lines for the log.
+    /// </summary>
+    public static List<string> MigrateToMachine(string account)
+    {
+        var log = new List<string>();
+        using var lm = Registry.LocalMachine.CreateSubKey(MachineRoot, true);
+        string marker = "ImportedFrom-" + account;
+        if (lm.GetValue(marker) != null) return log;
+        using var cu = Registry.CurrentUser.OpenSubKey(Root);
+        var plan = Settings.MachineImport(sub =>
+        {
+            using var k = string.IsNullOrEmpty(sub) ? null : cu?.OpenSubKey(sub);
+            var key = string.IsNullOrEmpty(sub) ? cu : k;
+            return key == null ? new Dictionary<string, string>() : key.GetValueNames().ToDictionary(n => n, n => Convert.ToString(key.GetValue(n, null, RegistryValueOptions.DoNotExpandEnvironmentNames), CultureInfo.InvariantCulture) ?? "", StringComparer.OrdinalIgnoreCase);
+        }, (sub, name) =>
+        {
+            using var k = Registry.LocalMachine.OpenSubKey(MachinePath(sub));
+            return k?.GetValue(name) != null;
+        }, log);
+        foreach (var (sub, name, value) in plan)
+        {
+            using var k = Registry.LocalMachine.CreateSubKey(MachinePath(sub), true);
+            k.SetValue(name, value, RegistryValueKind.String);
+        }
+        lm.SetValue(marker, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), RegistryValueKind.String);
+        return log;
     }
 
     /// <summary>Copies the legacy root (values with their kinds, subkeys recursively) once.</summary>
@@ -102,6 +149,57 @@ public static class Settings
 {
     public static ISettingsBackend Backend = new RegistrySettingsBackend();
     public const string AffinitySub = "Affinity";
+
+    /// <summary>
+    /// Values kept in HKLM (administrators only): they make the program act by itself with administrator rights.
+    /// The whole Flags subkey goes there too.
+    /// </summary>
+    public static readonly HashSet<string> MachineKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "GpuOcAtStart", "GpuOcCoreKHz", "GpuOcMemKHz", "GpuOcVoltPct", "GpuOcAppliedUtc", "SafeDeviceLayout112", "LegacyRawMouseChecked",
+    };
+
+    public static bool IsMachine(string sub, string name) =>
+        string.Equals(sub, Flags.Sub, StringComparison.OrdinalIgnoreCase) || (string.IsNullOrEmpty(sub) && name != null && MachineKeys.Contains(name));
+
+    /// <summary>
+    /// Whether a value read from HKCU may be copied to HKLM (pure). Flags: a known flag, "true"/"false". The one-shot
+    /// markers: only "true" (a planted "false" would make an old clean-up run again). The GPU values: integers in the
+    /// range the program writes and a time stamp. GpuOcAtStart is never taken: an overclock applied at start has to be
+    /// chosen again in the program (it cannot be told from one planted by another program).
+    /// </summary>
+    public static bool MachineValueValid(string sub, string name, string value)
+    {
+        value ??= "";
+        if (string.Equals(sub, Flags.Sub, StringComparison.OrdinalIgnoreCase))
+            return Flags.FlagKeys.Contains(name) && (value == "true" || value == "false");
+        if (!string.IsNullOrEmpty(sub)) return false;
+        bool Int(int lo, int hi) => int.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int v) && v >= lo && v <= hi;
+        return name switch
+        {
+            "SafeDeviceLayout112" or "LegacyRawMouseChecked" => value == "true",
+            "GpuOcCoreKHz" => Int(-1_000_000, 1_000_000),
+            "GpuOcMemKHz" => Int(-3_000_000, 3_000_000),
+            "GpuOcVoltPct" => Int(0, 100),
+            "GpuOcAppliedUtc" => value.Length == 0 || DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out _),
+            _ => false,
+        };
+    }
+
+    /// <summary>What <see cref="RegistrySettingsBackend.MigrateToMachine"/> copies (pure): read(sub) gives the HKCU values of a subkey.</summary>
+    public static List<(string Sub, string Name, string Value)> MachineImport(Func<string, Dictionary<string, string>> read, Func<string, string, bool> machineHas, List<string> log)
+    {
+        var plan = new List<(string, string, string)>();
+        foreach (var sub in new[] { "", Flags.Sub })
+            foreach (var (name, value) in read(sub))
+            {
+                if (!IsMachine(sub, name)) continue;
+                if (!MachineValueValid(sub, name, value)) { log?.Add(L.F("Settings: {0} was not taken over from the user settings (not a value the program writes)", (sub.Length > 0 ? sub + "\\" : "") + name)); continue; }
+                if (machineHas(sub, name)) continue;
+                plan.Add((sub, name, value));
+            }
+        return plan;
+    }
 
     /// <summary>Keys the product reads (section 17.1).</summary>
     public static readonly HashSet<string> ProductKeys = new(StringComparer.OrdinalIgnoreCase) { "Language", "WindowLeft", "WindowTop", "Autostart" };

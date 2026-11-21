@@ -17,6 +17,10 @@
     <!-- No background GC thread: the program allocates little, a blocking gen-2 collection is rare and short. -->
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <!-- Program.Main runs first (NativeHome: where the native libraries are unpacked), then WPF. -->
+    <StartupObject>DomainScheduler.App.Program</StartupObject>
+    <!-- DOTNET_STARTUP_HOOKS is ignored: no assembly named in the user's environment is loaded into this elevated process. -->
+    <StartupHookSupport>false</StartupHookSupport>
   </PropertyGroup>
   <ItemGroup>
     <Using Remove="System.Windows.Forms" />

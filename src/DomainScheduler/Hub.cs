@@ -179,14 +179,19 @@ internal sealed class Hub
 	/// <summary>
 	/// Writes the voltage boost and both clock offsets and reads each back: the lines say what is in force.
 	/// guard: remember when the values were set; if Windows crashes after that (blue screen or sudden power-off),
-	/// the profile is not applied at the next start.
+	/// the profile is not applied at the next start. On an AMD card (no NVIDIA card answers) the clock offsets, the
+	/// power limit and the voltage offset go through AmdOc instead; the crash guard is the same.
 	/// </summary>
-	public List<string> GpuOcApply(int coreKHz, int memKHz, int voltPct, bool guard = true)
+	public List<string> GpuOcApply(int coreKHz, int memKHz, int voltPct, bool guard = true, int powerPct = 0, int voltMv = 0)
 	{
 		List<string> list = new List<string>();
 		if (guard)
 		{
 			Settings.Set("GpuOcAppliedUtc", DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture));
+		}
+		if (GpuOc.Detect() == GpuOc.Amd)
+		{
+			return AmdApply(coreKHz / 1000, memKHz / 1000, voltPct, powerPct, voltMv);
 		}
 		int? num = NvOc.SetVoltage(voltPct);
 		list.Add(num.HasValue ? L.F("Voltage boost: {0}%", num.Value) : L.F("Voltage boost: {0}", NvOc.Error));
@@ -197,10 +202,55 @@ internal sealed class Hub
 		return list;
 	}
 
+	/// <summary>The AMD write: one apply through the driver, then one line per value with what is in force (read back).</summary>
+	private static List<string> AmdApply(int coreMHz, int memMHz, int voltPct, int powerPct, int voltMv)
+	{
+		List<string> list = new List<string>();
+		AmdState s = AmdOc.Apply(coreMHz, memMHz, powerPct, voltMv);
+		if (s == null)
+		{
+			list.Add(L.F("GPU overclock: {0}", AmdOc.Error));
+			return list;
+		}
+		if (s.Core.Editable)
+		{
+			list.Add(L.F("Core clock offset: {0:+0;-0;0} MHz", s.Core.Offset));
+		}
+		if (s.Mem.Editable)
+		{
+			list.Add(L.F("Memory clock offset: {0:+0;-0;0} MHz", s.Mem.Offset));
+		}
+		if (s.Power.Editable)
+		{
+			list.Add(L.F("Power limit: {0:+0;-0;0} %", s.Power.Offset));
+		}
+		if (s.Volt.Editable)
+		{
+			list.Add(L.F("Voltage offset: {0:+0;-0;0} mV", s.Volt.Offset));
+		}
+		if (voltPct > 0)
+		{
+			list.Add(L.T("This graphics card or driver does not offer a voltage boost"));
+		}
+		if (AmdOc.Error.Length > 0)
+		{
+			list.Add(L.F("GPU overclock: {0}", AmdOc.Error));
+		}
+		return list;
+	}
+
 	/// <summary>The saved profiles; the "apply at start" values of 1.12 and older become a profile the first time.</summary>
 	public static GpuProfiles GpuProfilesLoad()
 	{
-		bool exists = File.Exists(GpuProfiles.FilePath);
+		bool exists;
+		try
+		{
+			exists = File.Exists(GpuProfiles.FilePath);
+		}
+		catch (Exception)
+		{
+			exists = true;      // the state folder cannot be used: nothing is migrated (or saved)
+		}
 		GpuProfiles g = GpuProfiles.Load();
 		if (GpuOcLogic.Migrate(g, exists, Settings.GetBool("GpuOcAtStart"), Settings.GetInt("GpuOcCoreKHz", 0), Settings.GetInt("GpuOcMemKHz", 0), Settings.GetInt("GpuOcVoltPct", 0), L.T("Saved values")))
 		{
@@ -216,6 +266,33 @@ internal sealed class Hub
 		return g;
 	}
 
+	/// <summary>
+	/// The "apply at start" mark of a version before 1.15.0 Test 1.3 (GpuProfiles.Confirm): asked once, in this
+	/// administrator window (other programs of the user cannot click it), with the profile's values shown. Yes keeps the
+	/// mark (the start below then applies the profile, with the usual crash guard); No, or closing the question, drops
+	/// it. The profile stays in the list either way. Asked only while GPU overclocking is turned on.
+	/// </summary>
+	private static void AskOldStartMark(GpuProfiles g)
+	{
+		GpuProfile p = g.ConfirmProfile;
+		if (p == null || !Flags.Open("gpu-oc"))
+		{
+			return;
+		}
+		string text = L.F("Toolbox has moved its data into the protected folder.\n\nIn the previous version the GPU profile \"{0}\" (core {1:+0;-0;0} MHz, memory {2:+0;-0;0} MHz, voltage boost {3} %) was applied at every start. Keep applying it at start?\n\nYes: apply it now and at every start. No: do not apply it at start (the profile stays in the list).", p.Name, p.CoreMHz, p.MemMHz, p.VoltPct);
+		bool yes = System.Windows.MessageBox.Show(text, L.T("Domain OS Toolbox: GPU profile"), System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Question, System.Windows.MessageBoxResult.No) == System.Windows.MessageBoxResult.Yes;
+		g.SetAtStart(yes ? p.Name : null);
+		try
+		{
+			g.Save();
+			AppLog.Add(yes ? L.F("GPU profile \"{0}\": apply at start kept (confirmed after the update)", p.Name) : L.F("GPU profile \"{0}\": apply at start off (answered after the update)", p.Name));
+		}
+		catch (Exception ex)
+		{
+			AppLog.Add(L.F("GPU overclock: {0}", ex.Message), AppLog.Sev.Warn);
+		}
+	}
+
 	public void GpuOcStartup()
 	{
 		GpuProfiles g = GpuProfilesLoad();
@@ -223,6 +300,7 @@ internal sealed class Hub
 		// a normal restart or shutdown keeps the profile.
 		bool pending = DateTime.TryParse(Settings.Get("GpuOcAppliedUtc"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime appliedUtc)
 			&& BootGuard.UnexpectedShutdownSince(appliedUtc);
+		AskOldStartMark(g);
 		(GpuOcLogic.Start What, GpuProfile Profile) d = GpuOcLogic.DecideStart(Flags.Open("gpu-oc"), g, pending);
 		if (d.What == GpuOcLogic.Start.SkipCrash)
 		{
@@ -241,8 +319,15 @@ internal sealed class Hub
 		}
 		else if (d.What == GpuOcLogic.Start.Apply)
 		{
+			// Only on the maker's card the profile was saved for: an NVIDIA profile is never applied to an AMD card by itself.
+			string vendor = GpuOc.Detect();
+			if (!GpuOcLogic.Fits(d.Profile, vendor))
+			{
+				AppLog.Add(vendor.Length == 0 ? L.F("GPU profile \"{0}\" was not applied at start: no graphics card whose driver offers overclocking answered", d.Profile.Name) : L.F("GPU profile \"{0}\" was not applied at start: it was saved for a card of another maker", d.Profile.Name), AppLog.Sev.Warn);
+				return;
+			}
 			AppLog.Add(L.F("GPU profile \"{0}\" applied at start", d.Profile.Name));
-			foreach (string item in GpuOcApply(d.Profile.CoreMHz * 1000, d.Profile.MemMHz * 1000, d.Profile.VoltPct))
+			foreach (string item in GpuOcApply(d.Profile.CoreMHz * 1000, d.Profile.MemMHz * 1000, d.Profile.VoltPct, true, d.Profile.PowerPct, d.Profile.VoltMv))
 			{
 				AppLog.Add(item);
 			}
@@ -472,7 +557,7 @@ internal sealed class Hub
 			TunerNoGain = TunerPending == null;
 			AppLog.Add(L.T("Auto-tune results (1% low per round):") + "\n" + Tuner.Table());
 			AppLog.Add(Tuner.Verdict, Tuner.Winner >= 0 ? AppLog.Sev.Info : AppLog.Sev.Warn);
-			// The result also goes to its own file at once: the log is a ring buffer and is written only on exit.
+			// The result also goes to its own file in the state folder, next to the log.
 			try
 			{
 				string file = System.IO.Path.Combine(Store.Dir, "autotune-" + DateTime.Now.ToString("yyyyMMdd-HHmm", System.Globalization.CultureInfo.InvariantCulture) + ".txt");

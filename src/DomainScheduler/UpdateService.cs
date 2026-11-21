@@ -10,8 +10,8 @@ using System.Windows.Threading;
 namespace DomainScheduler.App;
 
 /// <summary>
-/// Update checks (1.15.0): one minute after start and then once a day, only while the setting "CheckUpdates" is on
-/// (default on). Nothing is installed by itself: the home page and the About page show a card, the tray says it once
+/// Update checks (1.15.0): one minute after start and then once a day (an hour after a failed check), only while the
+/// setting "CheckUpdates" is on (default on). Nothing is installed by itself: the home page and the About page show a card, the tray says it once
 /// per version, and the person presses "Update". While a game is running (Auto active) nothing is shown or installed.
 /// </summary>
 internal sealed class UpdateService
@@ -48,7 +48,9 @@ internal sealed class UpdateService
 	{
 		_timer.Interval = TimeSpan.FromMinutes(10);
 		if (!Enabled || Checking) return;
-		if (DateTime.Now - LastAt >= TimeSpan.FromHours(24)) CheckNow();
+		// A failed check (no network yet, the site down) is tried again after an hour, not a day.
+		TimeSpan every = Last?.Error != null ? TimeSpan.FromHours(1) : TimeSpan.FromHours(24);
+		if (DateTime.Now - LastAt >= every) CheckNow();
 		else NotifyIfDue();
 	}
 
@@ -69,14 +71,27 @@ internal sealed class UpdateService
 		});
 	}
 
-	/// <summary>The tray says it once per version, and never during a game.</summary>
+	/// <summary>The tray says it once per version (Toolbox and the playbook each), and never during a game.</summary>
 	private void NotifyIfDue()
 	{
+		if (InGame) return;
 		var t = Last?.Toolbox;
-		if (t == null || InGame || Settings.Get("UpdateNotified") == t.Version) return;
-		Settings.Set("UpdateNotified", t.Version);
-		_notice(L.F("Toolbox {0} is available. Open the program to see what is new.", AppVersion.Describe(t.Version)));
+		if (t != null && Settings.Get("UpdateNotified") != t.Version)
+		{
+			Settings.Set("UpdateNotified", t.Version);
+			_notice(L.F("Toolbox {0} is available. Open the program to see what is new.", AppVersion.Describe(t.Version)));
+		}
+		var p = Last?.Playbook;
+		if (p != null && Settings.Get("PlaybookNotified") != p.Version)
+		{
+			Settings.Set("PlaybookNotified", p.Version);
+			_notice(L.F("Domain OS playbook {0} is out. Download it from the website or from Toolbox's home page.", p.Version));
+		}
 	}
+
+	/// <summary>The playbook's download page on the website (the language Toolbox speaks).</summary>
+	public const string SiteEn = "https://6kane1.github.io/DomainOS/index.html#download";
+	public const string SiteRu = "https://6kane1.github.io/DomainOS/ru/index.html#download";
 
 	public void InstallToolbox()
 	{
@@ -89,12 +104,13 @@ internal sealed class UpdateService
 		{
 			try
 			{
-				string file = await Updater.DownloadAsync(t, "DomainScheduler-" + t.Version + ".exe", progress);
+				// Checked in memory; these exact bytes become the program file (nothing is read back from disk).
+				byte[] content = await Updater.DownloadBytesAsync(t, progress);
 				_ui.BeginInvoke(() =>
 				{
 					if (InGame) { Busy = null; Error = L.T("Close the game first: Toolbox does not update while a game is running."); Fire(); return; }
 					Busy = L.T("Installing…"); Fire();
-					((App)Application.Current).InstallUpdate(file, t.Version, err => { Busy = null; Error = err; Fire(); });
+					((App)Application.Current).InstallUpdate(content, t.Version, err => { Busy = null; Error = err; Fire(); });
 				});
 			}
 			catch (Exception e)
@@ -115,7 +131,8 @@ internal sealed class UpdateService
 		{
 			try
 			{
-				string file = await Updater.DownloadAsync(p, "Domain-OS-" + p.Version + ".apbx", progress);
+				byte[] data = await Updater.DownloadBytesAsync(p, progress);
+				string file = Updater.WriteNew(data, "Domain-OS-" + p.Version + ".apbx");
 				_ui.BeginInvoke(() => { Busy = null; PlaybookFile = file; Fire(); ShowFile(file); });
 			}
 			catch (Exception e)
@@ -127,12 +144,24 @@ internal sealed class UpdateService
 
 	public static void ShowFile(string file)
 	{
-		try { Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + file + "\"") { UseShellExecute = true }); }
+		try
+		{
+			string explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+			Process.Start(new ProcessStartInfo(explorer, "/select,\"" + file + "\"") { UseShellExecute = false });
+		}
 		catch (Exception) { }
 	}
 
-	/// <summary>A game started or ended: the cards hide or show the Update button.</summary>
-	public void Poke() => Fire();
+	private bool _pokedInGame;
+
+	/// <summary>Auto changed: the cards are redrawn only when a game started or ended (they hide or show the Update button).</summary>
+	public void Poke()
+	{
+		bool g = InGame;
+		if (g == _pokedInGame) return;
+		_pokedInGame = g;
+		Fire();
+	}
 
 	private void Fire() => Changed?.Invoke();
 }
@@ -144,13 +173,28 @@ internal sealed class UpdateCard
 	private readonly StackPanel _body;
 	private readonly bool _always;
 
+	private readonly Action _onChanged;
+
 	public UpdateCard(bool always)
 	{
 		_always = always;
 		_body = Ui.Col();
 		Root = Ui.Card(_body);
 		Root.Margin = new Thickness(0, 0, 0, 8);
-		if (UpdateService.Instance != null) UpdateService.Instance.Changed += () => Root.Dispatcher.BeginInvoke(Refresh);
+		// Listens only while it is on screen: a page that is built again does not leave its old card subscribed.
+		_onChanged = () => Root.Dispatcher.BeginInvoke(new Action(Refresh));
+		Root.Loaded += delegate
+		{
+			var s = UpdateService.Instance;
+			if (s == null) return;
+			s.Changed -= _onChanged;
+			s.Changed += _onChanged;
+			Refresh();
+		};
+		Root.Unloaded += delegate
+		{
+			if (UpdateService.Instance != null) UpdateService.Instance.Changed -= _onChanged;
+		};
 		Refresh();
 	}
 
@@ -192,8 +236,8 @@ internal sealed class UpdateCard
 			}
 			else
 			{
-				_body.Children.Add(Ui.Row(Ui.Btn(L.T("Download"), s.DownloadPlaybook)));
-				_body.Children.Add(Ui.Note(L.T("The playbook is not installed by Toolbox: the file is downloaded and checked, AME Wizard installs it.")));
+				_body.Children.Add(Ui.Row(Ui.Btn(L.T("Download"), s.DownloadPlaybook), Ui.Btn(L.T("Open the website"), () => Hardware.OpenLink(L.Lang == "ru" ? UpdateService.SiteRu : UpdateService.SiteEn))));
+				_body.Children.Add(Ui.Note(L.T("The playbook is not installed by Toolbox: download the file here (it is checked) or from the website, then install it with AME Wizard.")));
 			}
 		}
 		if (s == null) return;

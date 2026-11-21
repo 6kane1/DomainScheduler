@@ -12,7 +12,8 @@ namespace DomainScheduler.App;
 /// The graphics card page in the HUD look (1.14.0). Same logic as 1.13.0 (feature flag, sliders that change nothing
 /// until Apply, Apply with confirmation, Reset to stock, profiles with save/load/apply/rename/delete/at start, the
 /// crash-guard warning, the values read back from the driver), laid out as readings tiles, an overclocking panel
-/// with segmented sliders and step buttons, and the profiles as a table.
+/// with segmented sliders and step buttons, and the profiles as a table. 1.15.0 Test 1.5: AMD Radeon cards through
+/// AmdOc (same sliders for the clock offsets, plus the power limit and the voltage offset instead of the voltage boost).
 /// </summary>
 internal sealed class GpuPage : Page
 {
@@ -43,6 +44,24 @@ internal sealed class GpuPage : Page
 	private bool _loaded;
 
 	private bool _hasVolt;
+
+	/// <summary>"nvidia" or "amd": whose overclocking the page shows (NVIDIA first, as before 1.15.0 Test 1.5).</summary>
+	private string _vendor = "";
+
+	/// <summary>The AMD card's values as read (null on NVIDIA); the clocks are also in _clocks in the NVIDIA shape.</summary>
+	private AmdState _amd;
+
+	private int _power;
+
+	private int _voltMv;
+
+	private GpuRange _powerRange = new GpuRange(0, 0, 1);
+
+	private GpuRange _voltMvRange = new GpuRange(0, 0, 5);
+
+	private bool Amd => _vendor == GpuOc.Amd;
+
+	private string OcError => GpuOc.Error(_vendor);
 
 	private GpuProfiles _store = new GpuProfiles();
 
@@ -132,16 +151,25 @@ internal sealed class GpuPage : Page
 			Hardware.Facts facts = Hardware.Detect();
 			List<NvClock> item = null;
 			int? item2 = null;
+			AmdState amd = null;
+			string vendor = Vendor(facts);
 			GpuProfiles store = Hub.GpuProfilesLoad();
-			if (Flags.Open("gpu-oc") && facts.Gpus.Any((Hardware.Gpu g) => g.Vendor == "nvidia" && !g.Basic))
+			if (Flags.Open("gpu-oc") && vendor == GpuOc.Nvidia)
 			{
 				item = NvOc.Read();
 				item2 = NvOc.GetVoltage();
 			}
-			return (facts: facts, clocks: item, volt: item2, store: store);
-		}, delegate((Hardware.Facts facts, List<NvClock> clocks, int? volt, GpuProfiles store) r)
+			else if (Flags.Open("gpu-oc") && vendor == GpuOc.Amd)
+			{
+				amd = AmdOc.Read();
+				item = AmdOc.Clocks(amd);
+			}
+			return (facts: facts, clocks: item, volt: item2, store: store, vendor: vendor, amd: amd);
+		}, delegate((Hardware.Facts facts, List<NvClock> clocks, int? volt, GpuProfiles store, string vendor, AmdState amd) r)
 		{
 			_store = r.store ?? new GpuProfiles();
+			_vendor = r.vendor;
+			_amd = r.amd;
 			_info.Children.Clear();
 			if (r.facts != null)
 			{
@@ -186,6 +214,11 @@ internal sealed class GpuPage : Page
 				_mem = (_clocks?.FirstOrDefault((NvClock c) => c.Domain == 4)?.DeltaKHz).GetValueOrDefault() / 1000;
 				_volt = r.volt.GetValueOrDefault();
 				_hasVolt = r.volt.HasValue;
+				// AMD: the power limit and the voltage as offsets from the driver's stock values.
+				_powerRange = GpuOcLogic.PowerRange(_amd?.Power);
+				_voltMvRange = GpuOcLogic.VoltMvRange(_amd?.Volt);
+				_power = (_amd != null && _amd.Power.Editable) ? _amd.Power.Offset : 0;
+				_voltMv = (_amd != null && _amd.Volt.Editable) ? Math.Min(0, _amd.Volt.Offset) : 0;
 				_loaded = true;
 				DrawTiles();
 				DrawOc(r.facts);
@@ -193,11 +226,29 @@ internal sealed class GpuPage : Page
 		});
 	}
 
+	/// <summary>Whose overclocking the page offers: NVIDIA when an NVIDIA card with its driver is there, else AMD.</summary>
+	private static string Vendor(Hardware.Facts facts)
+	{
+		if (facts == null)
+		{
+			return "";
+		}
+		if (facts.Gpus.Any((Hardware.Gpu g) => g.Vendor == "nvidia" && !g.Basic))
+		{
+			return GpuOc.Nvidia;
+		}
+		if (facts.Gpus.Any((Hardware.Gpu g) => g.Vendor == "amd" && !g.Basic))
+		{
+			return GpuOc.Amd;
+		}
+		return "";
+	}
+
 	public override void Tick()
 	{
 		if (_temp != null && _loaded && Flags.Open("gpu-oc"))
 		{
-			int num = NvOc.Temperature();
+			int num = Amd ? AmdOc.Temperature() : NvOc.Temperature();
 			if (num > 0)
 			{
 				Ui.SetValue(_temp, num.ToString(CultureInfo.CurrentCulture), "°C", "Accent");
@@ -241,7 +292,15 @@ internal sealed class GpuPage : Page
 			tiles.Add(Tile(L.T("Memory"), ((mem.BaseKHz + mem.DeltaKHz) / 1000).ToString("N0", CultureInfo.CurrentCulture), L.T("MHz"), L.F("stock {0} · offset {1}", mem.BaseKHz / 1000, Signed(mem.DeltaKHz / 1000)), out _));
 		}
 		tiles.Add(Tile(L.T("Temperature"), "—", null, L.T("read every second"), out _temp));
-		tiles.Add(Tile(L.T("Voltage boost"), _hasVolt ? _volt.ToString(CultureInfo.InvariantCulture) : "—", _hasVolt ? "%" : null, _hasVolt ? L.T("of what the maker allows") : L.T("not offered"), out _));
+		if (Amd)
+		{
+			bool pw = _amd != null && _amd.Power.Editable;
+			tiles.Add(Tile(L.T("Power limit"), pw ? Signed(_amd.Power.Offset) : "—", pw ? "%" : null, pw ? L.T("offset from stock") : L.T("not offered"), out _));
+		}
+		else
+		{
+			tiles.Add(Tile(L.T("Voltage boost"), _hasVolt ? _volt.ToString(CultureInfo.InvariantCulture) : "—", _hasVolt ? "%" : null, _hasVolt ? L.T("of what the maker allows") : L.T("not offered"), out _));
+		}
 		UniformGrid grid = new UniformGrid
 		{
 			Columns = tiles.Count,
@@ -384,7 +443,7 @@ internal sealed class GpuPage : Page
 		});
 		TextBlock lo = ScaleText(Signed(range.Min));
 		scale.Children.Add(lo);
-		TextBlock hi = ScaleText(Signed(range.Max) + ((unit == "%") ? " %" : ""));
+		TextBlock hi = ScaleText(Signed(range.Max) + ((unit == "%" || unit == "±%") ? " %" : ((unit == "mV") ? " mV" : "")));
 		hi.HorizontalAlignment = HorizontalAlignment.Right;
 		Grid.SetColumn(hi, 1);
 		scale.Children.Add(hi);
@@ -403,7 +462,8 @@ internal sealed class GpuPage : Page
 		};
 		void Show()
 		{
-			Ui.SetValue(value, (unit == "%") ? get().ToString(CultureInfo.InvariantCulture) : Signed(get()), (unit == "%") ? "%" : L.T("MHz"));
+			// "%": 0–100 (NVIDIA voltage boost); "±%": a signed percent offset (AMD power limit); "mV": AMD voltage offset.
+			Ui.SetValue(value, (unit == "%") ? get().ToString(CultureInfo.InvariantCulture) : Signed(get()), (unit == "%" || unit == "±%") ? "%" : ((unit == "mV") ? "mV" : L.T("MHz")));
 		}
 	}
 
@@ -446,7 +506,9 @@ internal sealed class GpuPage : Page
 	/// <summary>Writes the values, reads them back, logs what is in force and redraws the page from the driver.</summary>
 	private void Apply(int coreMHz, int memMHz, int volt, string profile)
 	{
-		S.BusyTask(L.T("Writing…"), () => H.GpuOcApply(coreMHz * 1000, memMHz * 1000, volt), delegate(List<string> log)
+		int power = Amd ? _power : 0;
+		int voltMv = Amd ? _voltMv : 0;
+		S.BusyTask(L.T("Writing…"), () => H.GpuOcApply(coreMHz * 1000, memMHz * 1000, Amd ? 0 : volt, true, power, voltMv), delegate(List<string> log)
 		{
 			if (profile != null)
 			{
@@ -454,7 +516,7 @@ internal sealed class GpuPage : Page
 			}
 			foreach (string item in log ?? new List<string>())
 			{
-				S.Did(item, (item.Contains(NvOc.Error) && NvOc.Error.Length > 0) ? AppLog.Sev.Warn : AppLog.Sev.Info);
+				S.Did(item, (OcError.Length > 0 && item.Contains(OcError)) ? AppLog.Sev.Warn : AppLog.Sev.Info);
 			}
 			Shown();
 		});
@@ -481,8 +543,12 @@ internal sealed class GpuPage : Page
 		_core = _coreRange.Snap(p.CoreMHz);
 		_mem = _memRange.Snap(p.MemMHz);
 		_volt = _hasVolt ? GpuOcLogic.Volt.Snap(p.VoltPct) : 0;
+		_power = Amd ? _powerRange.Snap(p.PowerPct) : 0;
+		_voltMv = Amd ? _voltMvRange.Snap(p.VoltMv) : 0;
 		SyncSliders();
-		return _core != p.CoreMHz || _mem != p.MemMHz || (_hasVolt && _volt != p.VoltPct);
+		bool cut = _core != p.CoreMHz || _mem != p.MemMHz;
+		// Values this maker's card does not have count as cut: NVIDIA has no power limit here, AMD no voltage boost.
+		return Amd ? (cut || _power != p.PowerPct || _voltMv != p.VoltMv || p.VoltPct != 0) : (cut || (_hasVolt && _volt != p.VoltPct) || p.PowerPct != 0 || p.VoltMv != 0);
 	}
 
 	private void DrawOc(Hardware.Facts facts)
@@ -496,14 +562,15 @@ internal sealed class GpuPage : Page
 			_oc.Children.Add(Ui.Card(Ui.Col(head, Ui.Note(L.T("Closed. Open the feature flag \"GPU overclocking\" on the Settings page if you know what you are doing: wrong values make the card unstable, and extra voltage shortens its life."))), 11.0));
 			return;
 		}
-		if (!facts.Gpus.Any((Hardware.Gpu g) => g.Vendor == "nvidia" && !g.Basic))
+		if (_vendor.Length == 0)
 		{
-			_oc.Children.Add(Ui.Card(Ui.Col(head, Ui.Note(L.T("Available for NVIDIA cards with the NVIDIA driver installed. AMD and Intel cards are not supported yet."))), 11.0));
+			_oc.Children.Add(Ui.Card(Ui.Col(head, Ui.Note(L.T("Available for NVIDIA cards with the NVIDIA driver and for AMD Radeon cards with the AMD driver installed. Intel cards are not supported yet."))), 11.0));
 			return;
 		}
 		if (_clocks == null)
 		{
-			_oc.Children.Add(Ui.Card(Ui.Col(head, Ui.Text((NvOc.Error.Length > 0) ? NvOc.Error : L.T("The driver did not report its clocks."), Ui.FsNote, "Warn", bold: false, wrap: true)), 11.0));
+			// Nothing is offered and nothing is written: the driver's own answer says why (no ADL, no overdrive, odd table…).
+			_oc.Children.Add(Ui.Card(Ui.Col(head, Ui.Text((OcError.Length > 0) ? OcError : L.T("The driver did not report its clocks."), Ui.FsNote, "Warn", bold: false, wrap: true)), 11.0));
 			return;
 		}
 		NvClock nvClock = _clocks.FirstOrDefault((NvClock c) => c.Domain == 0);
@@ -534,7 +601,13 @@ internal sealed class GpuPage : Page
 			stackPanel.Children.Add(warn);
 		}
 		stackPanel.Children.Add(Ui.Note(L.T("Offsets are added to the card's own clocks. Raise in small steps and test in a game after each one; artefacts, a black screen or a driver restart mean the value is too high. Moving a slider changes nothing until you press \"Apply\".")));
-		TextBlock now = Ui.Text(L.F("In force now (read from the driver): core {0} · memory {1} · voltage boost {2}", Mhz((nvClock?.DeltaKHz).GetValueOrDefault() / 1000), Mhz((nvClock2?.DeltaKHz).GetValueOrDefault() / 1000), _hasVolt ? (_volt + " %") : "—"), Ui.FsSmall, "Silver", bold: false, wrap: true);
+		if (Amd)
+		{
+			stackPanel.Children.Add(Ui.Note(L.F("AMD Radeon ({0}): the offsets count from the card's stock maximum clocks that the driver reports; on older cards only the top performance state is raised, the lower states and the voltages stay as they are.", _amd.Kind)));
+		}
+		TextBlock now = Ui.Text(Amd
+			? L.F("In force now (read from the driver): core {0} · memory {1} · power limit {2} · voltage offset {3}", Mhz((nvClock?.DeltaKHz).GetValueOrDefault() / 1000), Mhz((nvClock2?.DeltaKHz).GetValueOrDefault() / 1000), _amd.Power.Editable ? (Signed(_amd.Power.Offset) + " %") : "—", _amd.Volt.Editable ? (Signed(_amd.Volt.Offset) + " mV") : "—")
+			: L.F("In force now (read from the driver): core {0} · memory {1} · voltage boost {2}", Mhz((nvClock?.DeltaKHz).GetValueOrDefault() / 1000), Mhz((nvClock2?.DeltaKHz).GetValueOrDefault() / 1000), _hasVolt ? (_volt + " %") : "—"), Ui.FsSmall, "Silver", bold: false, wrap: true);
 		now.FontFamily = Ui.Mono;
 		now.Margin = new Thickness(0.0, 8.0, 0.0, 0.0);
 		stackPanel.Children.Add(now);
@@ -560,7 +633,32 @@ internal sealed class GpuPage : Page
 		{
 			stackPanel.Children.Add(Ui.Note(L.T("The driver does not allow changing the memory clock on this card.")));
 		}
-		if (_hasVolt)
+		if (Amd)
+		{
+			if (_amd.Power.Editable)
+			{
+				stackPanel.Children.Add(SliderRow(L.T("Power limit"), "±%", _powerRange, () => _power, delegate(int v)
+				{
+					_power = v;
+				}, L.F("offset from the stock power limit · allowed {0}…{1} % (reported by the driver)", Signed(_powerRange.Min), Signed(_powerRange.Max))));
+			}
+			else
+			{
+				stackPanel.Children.Add(Ui.Note(L.T("This card or driver does not offer a power limit.")));
+			}
+			if (_amd.Volt.Editable && _voltMvRange.Min < 0)
+			{
+				stackPanel.Children.Add(SliderRow(L.T("Voltage offset"), "mV", _voltMvRange, () => _voltMv, delegate(int v)
+				{
+					_voltMv = v;
+				}, L.F("only lowering (undervolt) · allowed {0}…0 mV · step {1} mV", _voltMvRange.Min, _voltMvRange.Step)));
+			}
+			else
+			{
+				stackPanel.Children.Add(Ui.Note(L.T("This card or driver does not offer a voltage offset.")));
+			}
+		}
+		else if (_hasVolt)
 		{
 			stackPanel.Children.Add(SliderRow(L.T("Voltage boost"), "%", GpuOcLogic.Volt, () => _volt, delegate(int v)
 			{
@@ -571,7 +669,7 @@ internal sealed class GpuPage : Page
 		{
 			stackPanel.Children.Add(Ui.Note(L.T("This card or driver does not offer a voltage boost.")));
 		}
-		TextBlock limits = Ui.Note(L.T("Power limit and fan control are not offered here."));
+		TextBlock limits = Ui.Note(Amd ? L.T("Fan control and memory timings are not offered here.") : L.T("Power limit and fan control are not offered here."));
 		limits.Margin = new Thickness(0.0, 12.0, 0.0, 0.0);
 		stackPanel.Children.Add(limits);
 		TextBlock risk = Ui.Text("▲  " + L.T("Extra voltage raises temperature and wear. Neither this program nor its authors answer for damage: use it at your own risk."), Ui.FsSmall, "Warn", bold: false, wrap: true);
@@ -591,10 +689,10 @@ internal sealed class GpuPage : Page
 			S.BusyTask(L.T("Writing…"), delegate
 			{
 				Settings.Set("GpuOcAppliedUtc", "");
-				return NvOc.Reset(force: true);
+				return Amd ? AmdOc.Reset(force: true) : NvOc.Reset(force: true);
 			}, delegate(bool ok)
 			{
-				S.Did(ok ? L.T("GPU overclock: clocks and voltage are back to stock") : L.F("GPU overclock: {0}", NvOc.Error), (!ok) ? AppLog.Sev.Warn : AppLog.Sev.Info);
+				S.Did(ok ? (Amd ? L.T("GPU overclock: clocks, power limit and voltage are back to the driver's stock values") : L.T("GPU overclock: clocks and voltage are back to stock")) : L.F("GPU overclock: {0}", OcError), (!ok) ? AppLog.Sev.Warn : AppLog.Sev.Info);
 				if (_store.AtStart.Length > 0)
 				{
 					_store.SetAtStart(null);
@@ -623,7 +721,7 @@ internal sealed class GpuPage : Page
 			Child = buttons
 		};
 		stackPanel.Children.Add(bar);
-		TextBlock stay = Ui.Note(L.T("The values stay in the driver when the program closes. A restart of Windows or of the driver returns the card to stock until they are applied again."));
+		TextBlock stay = Ui.Note(Amd ? L.T("The values stay in the driver when the program closes. Whether the AMD driver keeps them after a restart of Windows depends on the driver; after a crash it usually returns the card to stock by itself. \"Reset to stock\" always writes the driver's own stock values.") : L.T("The values stay in the driver when the program closes. A restart of Windows or of the driver returns the card to stock until they are applied again."));
 		stay.Margin = new Thickness(0.0, 10.0, 0.0, 0.0);
 		stackPanel.Children.Add(stay);
 		_oc.Children.Add(Ui.Card(stackPanel, 11.0));
@@ -639,7 +737,7 @@ internal sealed class GpuPage : Page
 		AddCell(header, Ui.Caps(L.T("Name"), Ui.FsSmall * 0.9, "Faint"), 0);
 		AddCell(header, Ui.Caps(L.T("Core"), Ui.FsSmall * 0.9, "Faint"), 1, right: true);
 		AddCell(header, Ui.Caps(L.T("Mem."), Ui.FsSmall * 0.9, "Faint"), 2, right: true);
-		AddCell(header, Ui.Caps("U", Ui.FsSmall * 0.9, "Faint"), 3, right: true);
+		AddCell(header, Ui.Caps(Amd ? "P" : "U", Ui.FsSmall * 0.9, "Faint"), 3, right: true);
 		col.Children.Add(new Border
 		{
 			BorderBrush = Ui.B("Line"),
@@ -684,7 +782,7 @@ internal sealed class GpuPage : Page
 				return;
 			}
 			bool existed = _store.Find(n) != null;
-			_store.Put(n, _core, _mem, _volt);
+			_store.Put(n, _core, _mem, Amd ? 0 : _volt, Amd ? _power : 0, Amd ? _voltMv : 0, _vendor);
 			if (SaveStore())
 			{
 				S.Did(existed ? L.F("GPU profile \"{0}\" overwritten", n) : L.F("GPU profile \"{0}\" saved", n));
@@ -767,13 +865,14 @@ internal sealed class GpuPage : Page
 		AddCell(g, name, 0);
 		AddCell(g, Num(Signed(p.CoreMHz), selected), 1, right: true);
 		AddCell(g, Num(Signed(p.MemMHz), selected), 2, right: true);
-		AddCell(g, Num(p.VoltPct.ToString(CultureInfo.InvariantCulture), selected), 3, right: true);
+		// The last column: the voltage boost of an NVIDIA profile, the power limit offset of an AMD one.
+		AddCell(g, Num((p.Maker == GpuOc.Amd) ? Signed(p.PowerPct) : p.VoltPct.ToString(CultureInfo.InvariantCulture), selected), 3, right: true);
 		Grid row = new Grid
 		{
 			MinHeight = 36.0,
 			Background = Ui.B(selected ? "Sel" : "None"),
 			Cursor = System.Windows.Input.Cursors.Hand,
-			ToolTip = L.F("core {0} · memory {1} · voltage boost {2} %", Mhz(p.CoreMHz), Mhz(p.MemMHz), p.VoltPct)
+			ToolTip = (p.Maker == GpuOc.Amd) ? L.F("AMD · core {0} · memory {1} · power limit {2} % · voltage offset {3} mV", Mhz(p.CoreMHz), Mhz(p.MemMHz), Signed(p.PowerPct), Signed(p.VoltMv)) : L.F("core {0} · memory {1} · voltage boost {2} %", Mhz(p.CoreMHz), Mhz(p.MemMHz), p.VoltPct)
 		};
 		if (selected)
 		{
@@ -890,6 +989,12 @@ internal sealed class GpuPage : Page
 		});
 		delete.MinWidth = 0.0;
 		Add(delete);
+		if (_vendor.Length > 0 && p.Maker != _vendor)
+		{
+			TextBlock other = Ui.Note(L.T("This profile was saved for a card of another maker: it is never applied at start on this card. Loading it into the sliders keeps only what this card allows."));
+			other.Margin = new Thickness(0.0, 4.0, 0.0, 0.0);
+			return Ui.Col(actions, renameRow, other);
+		}
 		return Ui.Col(actions, renameRow);
 	}
 }

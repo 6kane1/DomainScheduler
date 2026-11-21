@@ -230,13 +230,9 @@ internal static class Hardware
 		try
 		{
 			using Process process = new Process();
-			process.StartInfo = new ProcessStartInfo(exe, args)
-			{
-				UseShellExecute = false,
-				CreateNoWindow = true,
-				RedirectStandardOutput = true,
-				RedirectStandardError = true
-			};
+			// A bare tool name ("powercfg.exe") is started from System32 by its full path, never looked up in PATH.
+			process.StartInfo = SysExe.Start(exe);
+			process.StartInfo.Arguments = args;
 			process.Start();
 			Task<string> task = process.StandardOutput.ReadToEndAsync();
 			Task<string> task2 = process.StandardError.ReadToEndAsync();

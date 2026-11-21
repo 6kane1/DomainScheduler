@@ -40,11 +40,13 @@ internal sealed class DriversPage : Page
 			{
 				try
 				{
-					Process.Start(new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + guide + "\"")
+					// Windows PowerShell by its full path, no profile, only Windows' own modules (SysExe).
+					ProcessStartInfo psi = SysExe.Start(SysExe.PowerShellPath, redirect: false);
+					foreach (string a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", guide })
 					{
-						UseShellExecute = false,
-						CreateNoWindow = true
-					});
+						psi.ArgumentList.Add(a);
+					}
+					Process.Start(psi);
 				}
 				catch (Exception ex)
 				{

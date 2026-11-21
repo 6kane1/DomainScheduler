@@ -2,15 +2,26 @@ using System.Text.Json;
 
 namespace DomainScheduler;
 
-/// <summary>One set of GPU overclock values the user saved under a name (MHz offsets and the voltage boost in percent).</summary>
+/// <summary>
+/// One set of GPU overclock values the user saved under a name. Clocks are MHz OFFSETS from the card's stock values for
+/// both makers (NVIDIA: the driver's offset itself; AMD: the distance from the stock maximum clock the driver reports,
+/// read again at every apply), so a profile never holds an absolute clock. VoltPct is NVIDIA's voltage boost (0–100 %);
+/// PowerPct (power limit, offset in percent) and VoltMv (voltage offset in mV, only ≤ 0 is ever written) are AMD's.
+/// Vendor says for which maker's card the profile was saved ("" = before 1.15.0 Test 1.5, when only NVIDIA existed).
+/// </summary>
 public sealed class GpuProfile
 {
     public string Name { get; set; } = "";
     public int CoreMHz { get; set; }
     public int MemMHz { get; set; }
     public int VoltPct { get; set; }
+    public int PowerPct { get; set; }
+    public int VoltMv { get; set; }
+    public string Vendor { get; set; } = "";
 
-    public bool IsStock => CoreMHz == 0 && MemMHz == 0 && VoltPct == 0;
+    public bool IsStock => CoreMHz == 0 && MemMHz == 0 && VoltPct == 0 && PowerPct == 0 && VoltMv == 0;
+    /// <summary>The maker the profile belongs to: "amd" or "nvidia" (old profiles are NVIDIA's).</summary>
+    public string Maker => Vendor == GpuOc.Amd ? GpuOc.Amd : GpuOc.Nvidia;
 }
 
 /// <summary>A slider range: whole steps from Min to Max (both on the step grid, Min ≤ 0 ≤ Max when the driver allows it).</summary>
@@ -38,10 +49,18 @@ public sealed class GpuProfiles
     /// <summary>The profile that was NOT re-applied at the last start because of the crash guard (empty = none).</summary>
     public string Skipped { get; set; } = "";
     public DateTime SkippedUtc { get; set; }
+    /// <summary>
+    /// The profile that was marked "apply at start" in a version before 1.15.0 Test 1.3 (empty = none). The old file lay
+    /// in a folder any program of the user can change, so the mark is not taken over as it is: the program asks once,
+    /// in its own (administrator) window, whether to keep applying this profile at start. Yes makes it AtStart, No
+    /// clears it; the profile itself stays in the list either way.
+    /// </summary>
+    public string Confirm { get; set; } = "";
 
     public const int MaxName = 40;
     public static Func<string> PathHook;
-    public static string FilePath => PathHook?.Invoke() ?? Path.Combine(Store.Dir, "gpu-profiles.json");
+    internal const string FileName = "gpu-profiles.json";
+    public static string FilePath => PathHook?.Invoke() ?? Path.Combine(Store.Dir, FileName);
 
     static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };
 
@@ -59,7 +78,7 @@ public sealed class GpuProfiles
     }
 
     /// <summary>Saves the values under a name; a profile with the same name (any case) is overwritten. False for a bad name.</summary>
-    public bool Put(string name, int coreMHz, int memMHz, int voltPct)
+    public bool Put(string name, int coreMHz, int memMHz, int voltPct, int powerPct = 0, int voltMv = 0, string vendor = null)
     {
         string n = CleanName(name);
         if (n == null) return false;
@@ -69,6 +88,9 @@ public sealed class GpuProfiles
         p.CoreMHz = coreMHz;
         p.MemMHz = memMHz;
         p.VoltPct = Math.Clamp(voltPct, 0, 100);
+        p.PowerPct = Math.Clamp(powerPct, -100, 100);
+        p.VoltMv = Math.Clamp(voltMv, -500, 0);
+        p.Vendor = vendor == GpuOc.Amd ? GpuOc.Amd : vendor == GpuOc.Nvidia ? GpuOc.Nvidia : "";
         return true;
     }
 
@@ -82,9 +104,11 @@ public sealed class GpuProfiles
         if (other != null && other != p) return false;
         bool start = p == StartProfile;
         bool skipped = string.Equals(Skipped, p.Name, StringComparison.OrdinalIgnoreCase);
+        bool confirm = string.Equals(Confirm, p.Name, StringComparison.OrdinalIgnoreCase);
         p.Name = n;
         if (start) AtStart = n;
         if (skipped) Skipped = n;
+        if (confirm) Confirm = n;
         return true;
     }
 
@@ -95,20 +119,28 @@ public sealed class GpuProfiles
         if (p == null) return false;
         if (p == StartProfile) AtStart = "";
         if (string.Equals(Skipped, p.Name, StringComparison.OrdinalIgnoreCase)) Skipped = "";
+        if (string.Equals(Confirm, p.Name, StringComparison.OrdinalIgnoreCase)) Confirm = "";
         Profiles.Remove(p);
         return true;
     }
 
-    /// <summary>Marks one profile (or none, with null/empty) to be applied at start. Marking clears the crash-guard notice.</summary>
+    /// <summary>
+    /// Marks one profile (or none, with null/empty) to be applied at start. Marking clears the crash-guard notice; any
+    /// choice made here also answers the pending question about the old mark (Confirm).
+    /// </summary>
     public bool SetAtStart(string name)
     {
-        if (string.IsNullOrWhiteSpace(name)) { AtStart = ""; return true; }
+        if (string.IsNullOrWhiteSpace(name)) { AtStart = ""; Confirm = ""; return true; }
         var p = Find(name);
         if (p == null) return false;
         AtStart = p.Name;
         Skipped = "";
+        Confirm = "";
         return true;
     }
+
+    /// <summary>The profile whose old "apply at start" mark still waits for the user's answer (null = none).</summary>
+    public GpuProfile ConfirmProfile => AtStart.Length > 0 ? null : Find(Confirm);
 
     public static GpuProfiles Load(string path = null)
     {
@@ -120,9 +152,17 @@ public sealed class GpuProfiles
             g.Profiles ??= new();
             g.Profiles = g.Profiles.Where(p => p != null && CleanName(p.Name) != null)
                 .GroupBy(p => p.Name.Trim(), StringComparer.OrdinalIgnoreCase).Select(x => x.First()).ToList();
-            foreach (var p in g.Profiles) { p.Name = p.Name.Trim(); p.VoltPct = Math.Clamp(p.VoltPct, 0, 100); }
+            foreach (var p in g.Profiles)
+            {
+                p.Name = p.Name.Trim();
+                p.VoltPct = Math.Clamp(p.VoltPct, 0, 100);
+                p.PowerPct = Math.Clamp(p.PowerPct, -100, 100);
+                p.VoltMv = Math.Clamp(p.VoltMv, -500, 0);
+                p.Vendor = p.Vendor == GpuOc.Amd || p.Vendor == GpuOc.Nvidia ? p.Vendor : "";
+            }
             g.AtStart = g.Find(g.AtStart)?.Name ?? "";
             g.Skipped ??= "";
+            g.Confirm = g.AtStart.Length > 0 ? "" : g.Find(g.Confirm)?.Name ?? "";
             return g;
         }
         catch (Exception) { return new GpuProfiles(); }
@@ -160,6 +200,32 @@ public static class GpuOcLogic
 
     public static GpuRange CoreRange(NvClock c) => Range(c, NvOc.DomainCore, CoreStep, CoreFallback);
     public static GpuRange MemRange(NvClock c) => Range(c, NvOc.DomainMemory, MemStep, MemFallback);
+
+    public const int PowerStep = 1, VoltMvStep = 5;
+
+    /// <summary>An AMD offset range (power limit, voltage) from the driver's absolute range around its stock value.</summary>
+    public static GpuRange OffsetRange(AmdDomain d, int step)
+    {
+        if (d == null || !d.Editable) return new GpuRange(0, 0, step);
+        int lo = Math.Min(0, d.Min - d.Default), hi = Math.Max(0, d.Max - d.Default);
+        int min = (int)Math.Ceiling(lo / (double)step) * step, max = (int)Math.Floor(hi / (double)step) * step;
+        if (min > max) min = max = 0;
+        return new GpuRange(min, max, step);
+    }
+
+    public static GpuRange PowerRange(AmdDomain d) => OffsetRange(d, PowerStep);
+    /// <summary>The AMD voltage offset only goes down: the range ends at zero.</summary>
+    public static GpuRange VoltMvRange(AmdDomain d)
+    {
+        var r = OffsetRange(d, VoltMvStep);
+        return new GpuRange(r.Min, 0, r.Step);
+    }
+
+    /// <summary>
+    /// Whether a profile may be applied at start on this maker's card: only on the maker it was saved for (old profiles
+    /// are NVIDIA's). A profile of the other maker is never applied by itself; loading it by hand stays possible.
+    /// </summary>
+    public static bool Fits(GpuProfile p, string vendor) => p != null && (vendor == GpuOc.Nvidia || vendor == GpuOc.Amd) && p.Maker == vendor;
 
     public enum Start { Nothing, Apply, SkipCrash }
 

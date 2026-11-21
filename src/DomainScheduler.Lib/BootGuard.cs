@@ -30,7 +30,8 @@ public static class BootGuard
     public enum Verdict { Nothing, Wait, Revert }
 
     public static Func<string> PathHook;
-    public static string FilePath => PathHook?.Invoke() ?? Path.Combine(Store.Dir, "device-boot-guard.json");
+    internal const string FileName = "device-boot-guard.json";
+    public static string FilePath => PathHook?.Invoke() ?? Path.Combine(Store.Dir, FileName);
     /// <summary>Tests: the unexpected-shutdown check (applied time → seen).</summary>
     public static Func<DateTime, bool> CrashHook;
 
@@ -160,8 +161,9 @@ public static class BootGuard
             string since = utc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
             string q = "*[System[((Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41) or (Provider[@Name='EventLog'] and EventID=6008) or (Provider[@Name='Microsoft-Windows-WER-SystemErrorReporting'] and EventID=1001))"
                      + " and TimeCreated[@SystemTime>='" + since + "']]]";
-            var psi = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "wevtutil.exe"), $"qe System /q:\"{q}\" /c:1 /f:xml")
-                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+            var psi = SysExe.Start("wevtutil.exe", redirect: false);
+            psi.RedirectStandardOutput = true;
+            psi.Arguments = $"qe System /q:\"{q}\" /c:1 /f:xml";
             using var p = System.Diagnostics.Process.Start(psi)!;
             var text = p.StandardOutput.ReadToEndAsync();
             if (!p.WaitForExit(15000)) return false;

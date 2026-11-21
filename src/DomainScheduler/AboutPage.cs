@@ -81,9 +81,9 @@ internal sealed class AboutPage : Page
 		Assembly executingAssembly = Assembly.GetExecutingAssembly();
 		string text2 = Environment.ProcessPath ?? "";
 		FactGrid factGrid2 = new FactGrid(1).Add(L.T("Version"), AppVersion.Display + (AppVersion.IsTest ? " · " + L.T("test channel") : "")).Add(L.T("Build"), File.Exists(text2) ? File.GetLastWriteTime(text2).ToString("g", CultureInfo.CurrentCulture) : "").Add(L.T("Program"), text2)
-			.Add(L.T("Data"), Store.Dir)
-			.Add(L.T("Log"), AppLog.FilePath)
-			.Add(L.T("Settings"), "HKCU\\Software\\DomainScheduler")
+			.Add(L.T("Data"), Store.DirShown)
+			.Add(L.T("Log"), AppLog.ShownPath)
+			.Add(L.T("Settings"), "HKCU\\Software\\DomainScheduler · HKLM\\SOFTWARE\\Domain OS\\Toolbox")
 			.Add(L.T("Own load"), H.SelfLine())
 			.Add(L.T("SelfTest"), (H.SelfTest.Count == 0) ? L.T("OK") : string.Join("; ", H.SelfTest));
 		return Ui.Scroll(Ui.Col(new UpdateCard(always: true).Root, Ui.Card(Ui.Col(Ui.Head(L.T("This computer")), factGrid)), Ui.Card(Ui.Col(Ui.Head("DomainScheduler"), factGrid2))));

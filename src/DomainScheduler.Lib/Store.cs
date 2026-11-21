@@ -11,7 +11,16 @@ namespace DomainScheduler;
 public static class Store
 {
     public static Func<string> DirHook;
-    public static string Dir => DirHook?.Invoke() ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DomainScheduler");
+    /// <summary>
+    /// The data folder: the admin-only state folder (<see cref="StateDir"/>), checked before its first use. Everything
+    /// the program keeps lives here: presets, backups, the session, the boot guard, the log, update downloads.
+    /// Throws when the folder cannot be made safe (nothing is then read from it or written to it).
+    /// </summary>
+    public static string Dir => DirHook?.Invoke() ?? StateDir.Ensure();
+    /// <summary>The data folder for display (never throws, nothing is checked).</summary>
+    public static string DirShown => DirHook?.Invoke() ?? StateDir.PathOnly;
+    /// <summary>Where versions before 1.15.0 Test 1.3 kept their data (the user's own folder): only read once by <see cref="LegacyImport"/>.</summary>
+    public static string LegacyDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DomainScheduler");
     public static string ProfilesDir => Path.Combine(Dir, "profiles");
     public static string PresetsPath => Path.Combine(Dir, "presets.json");
     public const int Version = 1;

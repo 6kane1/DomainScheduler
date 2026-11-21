@@ -655,6 +655,7 @@ public sealed class Engine
         tb.PrioSet = _n.GetThreadPrio(th, out tb.Prio);
         tb.BoostSet = _n.GetThreadBoostDisabled(th, out tb.BoostDisabled);
         tb.SetsSet = _n.GetThreadCpuSets(th, out tb.Sets);
+        tb.IdealSet = _n.GetThreadIdeal(th, out tb.Ideal) && tb.Ideal < 64;     // kept in the session too: a crash restore puts it back
         _thrBefore[key] = tb;
         BeforeMutate?.Invoke();
     }
@@ -1199,10 +1200,17 @@ public sealed class Engine
         lock (_gate) return RevertLocked(pid);
     }
 
+    /// <summary>
+    /// Restores one process and its threads. A value Windows refused to put back (the process still lives) keeps its
+    /// baseline: <see cref="Pending"/> stays true, the session is not marked clean and the next revert or the crash
+    /// restore of the next start tries again. A process or thread that ended (or whose ID now belongs to another one)
+    /// is forgotten: there is nothing left to put back.
+    /// </summary>
     int RevertLocked(uint pid)
     {
         Interlocked.Increment(ref _reverts);
         int n = 0;
+        bool procLeft = false;
         if (_procBefore.TryGetValue(pid, out var b))
         {
             IntPtr ph = _n.OpenProcessGraceful(pid, out int level);
@@ -1210,11 +1218,17 @@ public sealed class Engine
                 try
                 {
                     long created = _n.ProcessCreated(ph);
-                    if (created == 0 || created == b.Created) n += RestoreProc(ph, level, b);
+                    if (created == 0 || created == b.Created)
+                    {
+                        var (done, failed) = RestoreProcCounted(ph, level, b);
+                        n += done;
+                        procLeft = failed > 0;
+                    }
                 }
                 finally { _n.Close(ph); }
         }
         string prefix = pid.ToString(CultureInfo.InvariantCulture) + ":";
+        var threadsLeft = new List<string>();
         foreach (var (key, tb) in _thrBefore.Where(kv => kv.Key.StartsWith(prefix, StringComparison.Ordinal)).ToList())
         {
             uint tid = uint.Parse(key[prefix.Length..], CultureInfo.InvariantCulture);
@@ -1224,38 +1238,66 @@ public sealed class Engine
             {
                 _n.ThreadTimes(th, out long born, out _);
                 if (born != tb.Born) continue;   // another thread with the same ID: skipped
-                if (tb.PrioSet && (!_n.GetThreadPrio(th, out int cur) || cur != tb.Prio) && Set(_n.SetThreadPrio(th, tb.Prio))) n++;
-                if (tb.BoostSet && (!_n.GetThreadBoostDisabled(th, out bool cb) || cb != tb.BoostDisabled) && Set(_n.SetThreadBoostDisabled(th, tb.BoostDisabled))) n++;
-                if (tb.SetsSet && _thrSets.ContainsKey(key) && Set(_n.SetThreadCpuSets(th, tb.Sets))) n++;
-                if (tb.IdealSet && Set(_n.SetThreadIdeal(th, tb.Ideal))) n++;
+                int bad = 0;
+                if (tb.PrioSet && (!_n.GetThreadPrio(th, out int cur) || cur != tb.Prio)) { if (Set(_n.SetThreadPrio(th, tb.Prio))) n++; else bad++; }
+                if (tb.BoostSet && (!_n.GetThreadBoostDisabled(th, out bool cb) || cb != tb.BoostDisabled)) { if (Set(_n.SetThreadBoostDisabled(th, tb.BoostDisabled))) n++; else bad++; }
+                if (tb.SetsSet && _thrSets.ContainsKey(key)) { if (Set(_n.SetThreadCpuSets(th, tb.Sets))) n++; else bad++; }
+                if (tb.IdealSet && _ideal.ContainsKey(key)) { if (Set(_n.SetThreadIdeal(th, tb.Ideal))) n++; else bad++; }
+                if (bad > 0) threadsLeft.Add(key);
             }
             finally { _n.Close(th); }
         }
+        if (!procLeft && threadsLeft.Count == 0) { Forget(pid); return n; }
+        // Something could not be put back: its baseline stays (only what was restored or ended is dropped).
+        var keepProc = procLeft && b != null ? b : null;
+        var keepThreads = threadsLeft.ToDictionary(k => k, k => _thrBefore[k]);
+        var keepIdeal = threadsLeft.Where(_ideal.ContainsKey).ToDictionary(k => k, k => _ideal[k]);
+        var keepSets = threadsLeft.Where(_thrSets.ContainsKey).ToDictionary(k => k, k => _thrSets[k]);
+        string name = _procName.GetValueOrDefault(pid, "");
+        bool bg = _bgPids.Contains(pid);
         Forget(pid);
+        if (keepProc != null) { _procBefore[pid] = keepProc; _procName[pid] = name; if (bg) _bgPids.Add(pid); }
+        foreach (var (k, tb) in keepThreads) _thrBefore[k] = tb;
+        foreach (var (k, v) in keepIdeal) _ideal[k] = v;
+        foreach (var (k, v) in keepSets) _thrSets[k] = v;
+        AppLog.Add(L.F("Revert: some values of {0} (PID {1}) could not be put back; they are tried again later", name.Length > 0 ? name : "?", pid), AppLog.Sev.Warn);
         return n;
     }
 
-    int RestoreProc(IntPtr ph, int level, ProcBefore b)
+    int RestoreProc(IntPtr ph, int level, ProcBefore b) => RestoreProcCounted(ph, level, b).Done;
+
+    (int Done, int Failed) RestoreProcCounted(IntPtr ph, int level, ProcBefore b)
     {
-        int n = 0;
-        if (b.SetsSet && (!_n.GetCpuSets(ph, out uint[] cur) || IdsKey(cur) != IdsKey(b.Sets)) && Set(_n.SetCpuSets(ph, b.Sets))) n++;
-        if (b.AffSet && level >= 1 && (!_n.GetAffinity(ph, out ulong a) || a != b.Aff) && Set(_n.SetAffinity(ph, b.Aff))) n++;
-        if (b.PrioSet && (!_n.GetPriorityClass(ph, out uint p) || p != b.Prio) && Set(_n.SetPriorityClass(ph, b.Prio))) n++;
-        if (b.IoSet && (!_n.GetIo(ph, out uint io) || io != b.Io) && Set(_n.SetIo(ph, b.Io))) n++;
-        if (b.MemSet && (!_n.GetMem(ph, out uint m) || m != b.Mem) && Set(_n.SetMem(ph, b.Mem))) n++;
-        if (b.EcoSet && (!_n.GetEco(ph, out uint c, out uint s) || c != b.EcoCtl || s != b.EcoState) && Set(_n.SetEco(ph, b.EcoCtl, b.EcoState))) n++;
-        if (b.BoostSet && (!_n.GetBoostDisabled(ph, out bool d) || d != b.BoostDisabled) && Set(_n.SetBoostDisabled(ph, b.BoostDisabled))) n++;
-        return n;
+        int n = 0, bad = 0;
+        void One(bool needed, Func<bool> write) { if (!needed) return; if (Set(write())) n++; else bad++; }
+        One(b.SetsSet && (!_n.GetCpuSets(ph, out uint[] cur) || IdsKey(cur) != IdsKey(b.Sets)), () => _n.SetCpuSets(ph, b.Sets));
+        One(b.AffSet && level >= 1 && (!_n.GetAffinity(ph, out ulong a) || a != b.Aff), () => _n.SetAffinity(ph, b.Aff));
+        One(b.PrioSet && (!_n.GetPriorityClass(ph, out uint p) || p != b.Prio), () => _n.SetPriorityClass(ph, b.Prio));
+        One(b.IoSet && (!_n.GetIo(ph, out uint io) || io != b.Io), () => _n.SetIo(ph, b.Io));
+        One(b.MemSet && (!_n.GetMem(ph, out uint m) || m != b.Mem), () => _n.SetMem(ph, b.Mem));
+        One(b.EcoSet && (!_n.GetEco(ph, out uint c, out uint s) || c != b.EcoCtl || s != b.EcoState), () => _n.SetEco(ph, b.EcoCtl, b.EcoState));
+        One(b.BoostSet && (!_n.GetBoostDisabled(ph, out bool d) || d != b.BoostDisabled), () => _n.SetBoostDisabled(ph, b.BoostDisabled));
+        return (n, bad);
     }
 
-    /// <summary>Reverts every process (game and background). Idempotent.</summary>
+    /// <summary>Baselines are left (a value could not be put back) or the timer request is still held.</summary>
+    public bool Pending
+    {
+        get { lock (_gate) return _procBefore.Count > 0 || _thrBefore.Count > 0 || _timerRequested; }
+    }
+
+    /// <summary>Reverts every process (game and background); one process failing does not stop the others. Idempotent.</summary>
     public int RevertAll()
     {
         lock (_gate)
         {
             int n = 0;
-            foreach (uint pid in _procBefore.Keys.ToList()) n += RevertLocked(pid);
-            foreach (uint pid in _thrBefore.Keys.Select(k => uint.Parse(k[..k.IndexOf(':')], CultureInfo.InvariantCulture)).Distinct().ToList()) n += RevertLocked(pid);
+            var pids = _procBefore.Keys.Concat(_thrBefore.Keys.Select(k => uint.Parse(k[..k.IndexOf(':')], CultureInfo.InvariantCulture))).Distinct().ToList();
+            foreach (uint pid in pids)
+            {
+                try { n += RevertLocked(pid); }
+                catch (Exception e) { AppLog.Add(L.F("Revert of PID {0}: {1}", pid, e.Message), AppLog.Sev.Warn); }
+            }
             return n;
         }
     }
@@ -1265,7 +1307,11 @@ public sealed class Engine
         lock (_gate)
         {
             int n = 0;
-            foreach (uint pid in _bgPids.ToList()) n += RevertLocked(pid);
+            foreach (uint pid in _bgPids.ToList())
+            {
+                try { n += RevertLocked(pid); }
+                catch (Exception e) { AppLog.Add(L.F("Revert of PID {0}: {1}", pid, e.Message), AppLog.Sev.Warn); }
+            }
             return n;
         }
     }
@@ -1333,27 +1379,58 @@ public sealed class Engine
                 {
                     Pid = uint.Parse(key[..i], CultureInfo.InvariantCulture), Tid = uint.Parse(key[(i + 1)..], CultureInfo.InvariantCulture),
                     Born = tb.Born, Prio = tb.Prio, PrioSet = tb.PrioSet, BoostDisabled = tb.BoostDisabled, BoostSet = tb.BoostSet,
-                    Sets = tb.Sets, SetsSet = tb.SetsSet,
+                    Sets = tb.Sets, SetsSet = tb.SetsSet, Ideal = tb.Ideal, IdealSet = tb.IdealSet && _ideal.ContainsKey(key),
                 });
             }
             return s;
         }
     }
 
-    /// <summary>Restores a session left by a crash: only processes and threads whose creation times still match.</summary>
+    /// <summary>
+    /// The values a crash restore may write (pure): the ones the program itself could have saved as a baseline. A
+    /// priority class of realtime, a time-critical thread priority, the critical I/O priority, an empty affinity or a
+    /// processor number past the last one are refused (the session file is never trusted further than that).
+    /// </summary>
+    public static bool SessionProcValid(SessionProc p) =>
+        p != null && (!p.PrioSet || (PRIO.ContainsValue(p.Prio) && p.Prio != PRIO["realtime"]))
+        && (!p.AffSet || p.Aff != 0) && (!p.IoSet || p.Io <= 3) && (!p.MemSet || p.Mem is >= 1 and <= 5)
+        && (!p.SetsSet || (p.Sets ?? Array.Empty<uint>()).Length <= 1024);
+
+    /// <summary>The ideal processor is a number inside the thread's processor group (0–63).</summary>
+    public static bool SessionThreadValid(SessionThread t) =>
+        t != null && (!t.PrioSet || (TPRIO.ContainsValue(t.Prio) && t.Prio != TPRIO["critical"]))
+        && (!t.IdealSet || t.Ideal < 64) && (!t.SetsSet || (t.Sets ?? Array.Empty<uint>()).Length <= 1024);
+
+    /// <summary>
+    /// Restores a session left by a crash: only processes and threads whose creation times still match, only values
+    /// that pass <see cref="SessionProcValid"/> / <see cref="SessionThreadValid"/>, and only processes the guard lets
+    /// the program touch in normal operation (the name must still be the one saved; anti-cheat and protected ones are skipped).
+    /// </summary>
     public int RestoreSession(SessionData s)
     {
         lock (_gate)
         {
             int n = 0;
+            if (s == null) return 0;
+            var procs = _n.Processes();
+            string Refused(uint pid, string savedName)
+            {
+                string now = procs.TryGetValue(pid, out var pr) ? pr.Name : "";
+                if (now.Length == 0) return "gone";
+                if (!string.IsNullOrEmpty(savedName) && !now.Equals(savedName, StringComparison.OrdinalIgnoreCase)) return "renamed";
+                return GateHook?.Invoke(pid, now);
+            }
+            var names = (s.Procs ?? new()).Where(p => p != null).GroupBy(p => p.Pid).ToDictionary(g => g.Key, g => g.First().Name);
             // Section 22.5: a timer request left by a crashed run is released before anything else.
             if (s.TimerRequested && _n.TimerQuery(out _, out uint finest, out _) && _n.TimerSet(finest, false, out _))
             {
                 n++;
                 AppLog.Add(L.T("Timer resolution: the request of the crashed run was released"));
             }
-            foreach (var p in s.Procs)
+            foreach (var p in s.Procs ?? new())
             {
+                if (!SessionProcValid(p)) { AppLog.Add(L.F("Crash restore: the saved values of PID {0} are not ones the program writes; skipped", p?.Pid ?? 0), AppLog.Sev.Warn); continue; }
+                if (Refused(p.Pid, p.Name) != null) continue;
                 IntPtr ph = _n.OpenProcessGraceful(p.Pid, out int level);
                 if (level < 0) continue;
                 try
@@ -1369,8 +1446,10 @@ public sealed class Engine
                 }
                 finally { _n.Close(ph); }
             }
-            foreach (var t in s.Threads)
+            foreach (var t in s.Threads ?? new())
             {
+                if (!SessionThreadValid(t)) { AppLog.Add(L.F("Crash restore: the saved values of thread {0} are not ones the program writes; skipped", t?.Tid ?? 0), AppLog.Sev.Warn); continue; }
+                if (Refused(t.Pid, names.GetValueOrDefault(t.Pid)) != null) continue;
                 IntPtr th = _n.OpenThreadOf(t.Pid, t.Tid);
                 if (th == IntPtr.Zero) continue;
                 try
@@ -1380,6 +1459,7 @@ public sealed class Engine
                     if (t.PrioSet && (!_n.GetThreadPrio(th, out int cur) || cur != t.Prio) && Set(_n.SetThreadPrio(th, t.Prio))) n++;
                     if (t.BoostSet && (!_n.GetThreadBoostDisabled(th, out bool cb) || cb != t.BoostDisabled) && Set(_n.SetThreadBoostDisabled(th, t.BoostDisabled))) n++;
                     if (t.SetsSet && _n.GetThreadCpuSets(th, out uint[] cs) && IdsKey(cs) != IdsKey(t.Sets) && Set(_n.SetThreadCpuSets(th, t.Sets))) n++;
+                    if (t.IdealSet && Set(_n.SetThreadIdeal(th, t.Ideal))) n++;
                 }
                 finally { _n.Close(th); }
             }

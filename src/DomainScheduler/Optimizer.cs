@@ -165,36 +165,28 @@ internal sealed class Optimizer : IDisposable
 		});
 	}
 
-	public void RunNow(Action job, int timeoutMs = 15000)
+	/// <summary>Runs the job on the worker and waits for it; false when it did not finish within the time (it may still run).</summary>
+	public bool RunNow(Action job, int timeoutMs = 15000)
 	{
 		if (_q.IsAddingCompleted || !_worker.IsAlive)
 		{
 			job();
-			return;
+			return true;
 		}
+		// Not disposed here: a job that is still running after the timeout sets it later.
 		ManualResetEventSlim done = new ManualResetEventSlim();
-		try
+		_q.Add(delegate
 		{
-			_q.Add(delegate
+			try
 			{
-				try
-				{
-					job();
-				}
-				finally
-				{
-					done.Set();
-				}
-			});
-			done.Wait(timeoutMs);
-		}
-		finally
-		{
-			if (done != null)
-			{
-				((IDisposable)done).Dispose();
+				job();
 			}
-		}
+			finally
+			{
+				done.Set();
+			}
+		});
+		return done.Wait(timeoutMs);
 	}
 
 	public void Dispose()

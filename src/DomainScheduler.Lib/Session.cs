@@ -36,6 +36,9 @@ public sealed class SessionThread
     public bool BoostSet { get; set; }
     public uint[] Sets { get; set; } = Array.Empty<uint>();
     public bool SetsSet { get; set; }
+    /// <summary>The ideal processor before the first change (crash restore puts it back).</summary>
+    public uint Ideal { get; set; }
+    public bool IdealSet { get; set; }
 }
 
 /// <summary>The crash-safe session file (section 12.10): baselines written before the first change.</summary>
@@ -52,7 +55,7 @@ public sealed class SessionData
 public static class SessionFile
 {
     public static Func<string> PathHook;
-    public static string FilePath => PathHook?.Invoke() ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DomainScheduler", "session.json");
+    public static string FilePath => PathHook?.Invoke() ?? Path.Combine(Store.Dir, "session.json");
 
     static readonly JsonSerializerOptions Opts = new() { WriteIndented = false };
 
@@ -74,6 +77,6 @@ public static class SessionFile
     public static void Delete()
     {
         try { File.Delete(FilePath); }
-        catch (IOException) { }
+        catch (Exception) { }
     }
 }

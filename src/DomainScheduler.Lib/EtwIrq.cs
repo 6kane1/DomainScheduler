@@ -126,8 +126,8 @@ public sealed class EtwIrq : IDisposable
             Marshal.WriteInt32(p, 40, 1);                           // Wnode.ClientContext: QPC
             Marshal.WriteInt32(p, 44, 0x20000);                     // WNODE_FLAG_TRACED_GUID
             Marshal.WriteInt32(p, 48, 256);                         // BufferSize (KB)
-            Marshal.WriteInt32(p, 52, 16);                          // MinimumBuffers
-            Marshal.WriteInt32(p, 56, 128);                         // MaximumBuffers
+            Marshal.WriteInt32(p, 52, 8);                           // MinimumBuffers
+            Marshal.WriteInt32(p, 56, 32);                          // MaximumBuffers: at most 8 MB of kernel memory, also if a killed copy left the session behind
             Marshal.WriteInt32(p, 64, 0x100 | 0x02000000);          // REAL_TIME | SYSTEM_LOGGER
             Marshal.WriteInt32(p, 68, 1);                           // FlushTimer (s)
             Marshal.WriteInt32(p, 72, (int)Flags);                  // EnableFlags

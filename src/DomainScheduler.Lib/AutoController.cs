@@ -147,6 +147,24 @@ public sealed class AutoController
 
     /// <summary>The watchlist (section 10): only a process on it may become the game. Null = no list (tests).</summary>
     public Func<ICollection<string>> WatchList;
+    sealed record LastGame(uint Pid, long Created);
+    volatile LastGame _lastGame;
+
+    /// <summary>
+    /// The last game Auto laid out still runs (also after a revert or an error switched Auto off). Read without the
+    /// lock: the error window asks it so that it never opens over a game that is still being played.
+    /// </summary>
+    public bool LastGameRunning
+    {
+        get
+        {
+            var g = _lastGame;
+            if (g == null) return false;
+            try { return ProcessAlive(g.Pid, g.Created); }
+            catch (Exception) { return false; }
+        }
+    }
+
     /// <summary>The game Auto is laying out now (0 = none): the preset layer leaves it alone.</summary>
     public uint GamePid { get { lock (_lock) return State == AutoState.Active ? _game : 0; } }
     public string GameExe { get { lock (_lock) return _gameExe; } }
@@ -250,8 +268,10 @@ public sealed class AutoController
                     Note(L.T("Armed"));
                     SetStatus(L.T("Waiting for the game…"));
                     // The background pass is extra: if it fails, Auto still waits for the game.
+                    _e.BeginPass();
                     try { PassBackground(); }
                     catch (Exception ex) { Note(L.F("Background pass failed: {0}", AppLog.Describe(ex)), AppLog.Sev.Warn); }
+                    finally { _e.EndPass(); }
                 }
                 else if (State is AutoState.Armed or AutoState.Active)
                     RevertAllLocked(L.T("Button"));
@@ -285,58 +305,70 @@ public sealed class AutoController
             _bgStandalone = false;
             int n = _e.RevertAll();
             if (n > 0) Note(L.F("Reverted ({0}): {1} values", why, n));
-            try
-            {
-                var s = _e.Export();
-                s.CleanShutdown = true;
-                SaveSession?.Invoke(s);
-            }
-            catch (Exception ex) { Note(L.F("Session file: {0}", ex.Message)); }
+            SaveAfterRevert(_sessionStart);
             _lastRevertReason = why;
             return n;
         }
     }
 
-    void RevertAllLocked(string why)
+    /// <summary>
+    /// After a revert the session is saved with what is left. It is marked clean only when nothing is left (every
+    /// value put back, the timer released); otherwise the baselines stay in the file and the next start restores them.
+    /// </summary>
+    void SaveAfterRevert(DateTime started)
     {
-        State = AutoState.Reverting;
-        SetStatus(L.T("Reverting…"));
-        _e.TimerRelease();
-        _bgStandalone = false;
-        int n = _e.RevertAll();
-        _frames.Watch(0);
-        Note(L.F("Reverted ({0}): {1} values", why, n));
         try
         {
             var s = _e.Export();
-            s.StartedUtc = _sessionStart;
-            s.CleanShutdown = true;
+            if (started != default) s.StartedUtc = started;
+            s.CleanShutdown = !_e.Pending;
+            if (!s.CleanShutdown) Note(L.T("Not every value could be put back: they stay saved and are restored at the next start"), AppLog.Sev.Warn);
             SaveSession?.Invoke(s);
         }
         catch (Exception ex) { Note(L.F("Session file: {0}", ex.Message)); }
-        ClearGame();
-        _lastRevertReason = why;
-        State = AutoState.Idle;
-        SetStatus(L.T("Off"));
+    }
+
+    void RevertAllLocked(string why)
+    {
+        State = AutoState.Reverting;
+        try
+        {
+            SetStatus(L.T("Reverting…"));
+            try { _e.TimerRelease(); } catch (Exception e) { Note(L.F("Revert error: {0}", e.Message), AppLog.Sev.Warn); }
+            _bgStandalone = false;
+            int n = 0;
+            try { n = _e.RevertAll(); } catch (Exception e) { Note(L.F("Revert error: {0}", e.Message), AppLog.Sev.Warn); }
+            try { _frames.Watch(0); } catch (Exception) { }
+            Note(L.F("Reverted ({0}): {1} values", why, n));
+            SaveAfterRevert(_sessionStart);
+            ClearGame();
+            _lastRevertReason = why;
+        }
+        finally
+        {
+            // Never stays "Reverting": that state ignores the button and the ticks.
+            State = AutoState.Idle;
+            SetStatus(L.T("Off"));
+        }
     }
 
     void FaultLocked(Exception ex)
     {
         State = AutoState.Faulted;
-        Note(L.F("Error: {0}", AppLog.Describe(ex)), AppLog.Sev.Error);
-        try { _e.TimerRelease(); } catch (Exception) { }
-        try { _e.RevertAll(); } catch (Exception e2) { Note(L.F("Revert error: {0}", e2.Message)); }
         try
         {
-            var s = _e.Export();
-            s.CleanShutdown = true;
-            SaveSession?.Invoke(s);
+            Note(L.F("Error: {0}", AppLog.Describe(ex)), AppLog.Sev.Error);
+            try { _e.TimerRelease(); } catch (Exception) { }
+            try { _e.RevertAll(); } catch (Exception e2) { Note(L.F("Revert error: {0}", e2.Message)); }
+            SaveAfterRevert(default);
+            try { _frames.Watch(0); } catch (Exception) { }
+            ClearGame();
         }
-        catch (Exception) { }
-        _frames.Watch(0);
-        ClearGame();
-        State = AutoState.Idle;
-        SetStatus(L.T("Error. Everything was put back. Open the Report."));
+        finally
+        {
+            State = AutoState.Idle;
+            SetStatus(L.T("Error. Everything was put back. Open the Report."));
+        }
     }
 
     void ClearGame()
@@ -513,6 +545,7 @@ public sealed class AutoController
         var procs = _e.ProcessesNow();
         _game = pid;
         _probe.CpuTime(pid, out _gameCreated, out _);
+        _lastGame = new LastGame(pid, _gameCreated);
         _games.Add((pid, _gameCreated));
         _gameExe = procs.TryGetValue(pid, out var p) ? p.Name : "";
         _absentSince = default;
@@ -574,7 +607,7 @@ public sealed class AutoController
                 snap = null;
                 for (int i = 0; i < AutoPolicy.WarmupRounds; i++)
                 {
-                    _e.Sleep(AutoPolicy.WarmupMs);
+                    if (!WarmupSleep()) return false;
                     snap = _e.Snapshot(_game);
                     if (snap.Rows.Count(r => r.Rate > 0) >= 2) break;
                 }
@@ -649,7 +682,7 @@ public sealed class AutoController
             if (first)
             {
                 _e.Snapshot(_game);
-                _e.Sleep(AutoPolicy.WarmupMs);
+                if (!WarmupSleep()) return false;
             }
             snap = _e.Snapshot(_game);
             if (!snap.Ok) return GameClosing(snap) ? false : Watchdog(L.T("The game process cannot be opened"));
@@ -673,6 +706,23 @@ public sealed class AutoController
         _applyErrors = 0;
         SetStatus(L.F("Game: {0} · dynamic Top-5", _gameExe));
         return true;
+    }
+
+    /// <summary>
+    /// The warm-up pause of the first application, with the lock let go: the window (which reads the state under the
+    /// same lock) does not freeze while the game starts. Nothing else runs a pass meanwhile (_busy is set); the button,
+    /// exit or a revert can, so false is returned when the game is no longer the active one afterwards.
+    /// </summary>
+    bool WarmupSleep()
+    {
+        uint game = _game;
+        long created = _gameCreated;
+        bool top5 = Top5Mode;
+        int depth = 0;
+        while (Monitor.IsEntered(_lock)) { Monitor.Exit(_lock); depth++; }
+        try { _e.Sleep(AutoPolicy.WarmupMs); }
+        finally { for (int i = 0; i < depth; i++) Monitor.Enter(_lock); }
+        return State == AutoState.Active && _game == game && _gameCreated == created && Top5Mode == top5;
     }
 
     /// <summary>
@@ -711,27 +761,35 @@ public sealed class AutoController
         lock (_lock)
         {
             if (_busy || State != AutoState.Idle) return 0;
-            var procs = _e.ProcessesNow();
-            var watch = WatchList?.Invoke();
-            var games = watch == null ? new HashSet<uint>() : procs.Where(p => watch.Contains(p.Value.Name)).Select(p => p.Key).ToHashSet();
-            Soft?.Tick(pid => _e.ProcessesNow().ContainsKey(pid));
-            if (!on || games.Count == 0)
-            {
-                if (!_bgStandalone) return 0;
-                _bgStandalone = false;
-                int n = _e.RevertBackground();
-                Note(L.F("BgRelease ({0}): {1} background values put back", on ? L.T("the game ended") : L.T("switched off"), n));
-                return n;
-            }
-            if (!_bgStandalone)
-            {
-                _bgStandalone = true;
-                Note(L.T("Background layer: on (a watched program is running)"));
-                Soft?.Begin(procs, games, watch, _probe.SelfPid);
-            }
-            PassBackground(games, gameMask);
-            return _e.BackgroundCount;
+            // One process list for the whole pass (the guard asks for it per process; without a pass every call took a new snapshot).
+            _e.BeginPass();
+            try { return StandaloneBackgroundLocked(on, gameMask); }
+            finally { _e.EndPass(); }
         }
+    }
+
+    int StandaloneBackgroundLocked(bool on, ulong gameMask)
+    {
+        var procs = _e.ProcessesNow();
+        var watch = WatchList?.Invoke();
+        var games = watch == null ? new HashSet<uint>() : procs.Where(p => watch.Contains(p.Value.Name)).Select(p => p.Key).ToHashSet();
+        Soft?.Tick(pid => _e.ProcessesNow().ContainsKey(pid));
+        if (!on || games.Count == 0)
+        {
+            if (!_bgStandalone) return 0;
+            _bgStandalone = false;
+            int n = _e.RevertBackground();
+            Note(L.F("BgRelease ({0}): {1} background values put back", on ? L.T("the game ended") : L.T("switched off"), n));
+            return n;
+        }
+        if (!_bgStandalone)
+        {
+            _bgStandalone = true;
+            Note(L.T("Background layer: on (a watched program is running)"));
+            Soft?.Begin(procs, games, watch, _probe.SelfPid);
+        }
+        PassBackground(games, gameMask);
+        return _e.BackgroundCount;
     }
 
     DateTime _bgFailLogged;

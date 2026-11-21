@@ -101,11 +101,47 @@ Settings that apply to every CPU:
   anti-cheats (Vanguard, EasyAntiCheat, BattlEye and others) are never opened. Check the rules of
   your league or platform before using any third-party tool.
 - The built-in presets are a starting point; review them for your own software.
+- The program runs with administrator rights (without a UAC prompt only if that playbook option was ticked; off by
+  default since playbook 2.1.9). Everything it
+  restores or acts on by itself is kept where only administrators can write (see below), and every restored value is
+  checked against what the program itself writes. Two things remain outside its control: the .NET host first unpacks
+  the program's native libraries into `%TEMP%` on the very first start of a run (the program then starts itself again
+  with them unpacked into its admin-only folder before any of them is loaded; if that is impossible it carries on with
+  the `%TEMP%` copy and logs it), and environment variables of your account that make .NET load extra code (a
+  profiler) still apply to that first start. With UAC prompts switched off, any program of an administrator account
+  can get administrator rights anyway; these protections matter most when UAC prompts are on.
+
+## GPU overclock
+
+Behind its own feature flag (Settings → feature flags → GPU overclocking, closed by default) the Graphics card page
+offers a small, careful overclock with named profiles, one of which can be applied at every start.
+
+- **NVIDIA** (through the NVIDIA driver): core and memory clock offsets and the voltage boost (0–100 % of what the
+  maker allows).
+- **AMD Radeon** (through the AMD driver's own interface, `atiadlxx.dll`, installed with every Radeon driver):
+  - RX 5000/6000/7000/9000 (Overdrive8): the maximum GPU clock, the maximum memory clock, the power limit (percent)
+    and, where the driver offers it, a voltage offset — lowering only (undervolt), never raising;
+  - Polaris RX 470/480/570/580/590 and Vega 56/64 (OverdriveN): the clock of the top performance state of the GPU and
+    of the memory, and the power limit. The lower states and every voltage are written back exactly as the driver
+    reports them.
+  - Only active adapters of a physical card are used (one per card; integrated Radeon graphics are left out).
+- Clocks are stored as **offsets from the card's stock values** for both makers (on AMD: from the stock maximum clock
+  the driver reports, read again at every apply), so a profile never holds an absolute clock. Every value is cut to
+  the range the driver reports, to its step and to the program's own caps (+300 MHz core, +1500 MHz memory, never
+  below −300 MHz), and is read back after writing.
+- **Reset to stock** writes the driver's own stock values (AMD Overdrive8: the driver's reset flag with its defaults;
+  OverdriveN: the driver's stock state table, power limit back to automatic). It reads everything fresh, so it also
+  works after a failed apply or in a new session.
+- **Apply at start** re-applies the marked profile only on a card of the maker it was saved for, and never after
+  Windows went down unexpectedly since the last apply (blue screen, freeze with a power-off): the crash guard is the
+  same for both makers.
+- No fan control, no memory timings, no process is closed. If the driver or its overclocking interface is missing,
+  the page says so and nothing is written. AMD support is new in 1.15.0 Test 1.5 and has not yet been run on real
+  Radeon cards: please report your card, driver version and what the page showed.
 
 ## Project status
 
-Released version: **1.14.1** (shipped with playbook 2.1.1, in [Releases](https://github.com/6kane1/DomainOS/releases)). This source is
-the development state, **1.15.0 in testing** (signed self-update, tester channel). 177 automated tests run against a
+Released version: **1.15.0** (shipped with playbook 2.2.0, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)): signed self-update with a backup key, AMD Radeon overclocking, a notice when a new playbook is out. 227 automated tests run against a
 simulated Windows (`dotnet test tests/DomainScheduler.Tests`). Hardware coverage is narrow: please report
 your CPU, Windows build and before/after numbers in the issues.
 
@@ -123,10 +159,77 @@ Third-party packages: Microsoft.Diagnostics.Tracing.TraceEvent, System.Managemen
 
 ## Where things are stored
 
-- Settings: `HKCU\Software\DomainScheduler`
-- Presets, profiles, log, session file: `%LOCALAPPDATA%\DomainScheduler`
-- Autostart: Task Scheduler task `DomainScheduler`
+- **State folder** `%ProgramData%\Domain OS Toolbox` — presets, profiles, GPU profiles, the backups of device,
+  registry, power and core-reservation changes, the crash-safe session file, the device boot guard, the log, update
+  downloads (`Updates`) and the program's unpacked native libraries (`native`). Only SYSTEM and Administrators can
+  change anything in it; other accounts can read it. Its owner and permissions are checked at every start: a folder
+  someone else could have written to is renamed `…untrusted-<time>`, never read, and a fresh one is made.
+- **Settings that make the program act by itself** (feature flags, the GPU overclock at start, one-shot clean-ups):
+  `HKLM\SOFTWARE\Domain OS\Toolbox` (administrators only).
+- **Window preferences** (language, position, charts, watchlist, mask choices): `HKCU\Software\DomainScheduler`.
+- Autostart: Task Scheduler task `DomainScheduler`.
 - **Settings → Factory reset** removes all of the above.
+
+Versions before 1.15.0 Test 1.3 kept their data in `%LOCALAPPDATA%\DomainScheduler`, which any program of your
+account can change. At start the program takes those files over once — only entries it could have written itself (a
+planted entry is dropped and named in the log) — and renames the old files `*.migrated`. The feature flags and the
+one-shot markers are copied from HKCU to HKLM once the same way. A GPU profile that was marked "apply at start" is
+not applied from the old file as it is: at the first start the program asks once, in its own window and with the
+profile's values shown, whether to keep applying it at start (Yes keeps the mark, No drops it; the profile stays).
+
+Every backup is checked again when it is restored: only the keys, value names, types and ranges the program writes
+are put back; anything else is refused and logged. Child processes (PowerShell, schtasks, bcdedit, wevtutil…) are
+started from System32 by their full path; PowerShell runs without a profile and sees only Windows' own modules, and
+no value is ever put into a command line as text.
+
+## Update keys and key rotation
+
+Update feeds (`update/stable.json`, the sealed test feed `update/test.bin`) are signed with ECDSA P-256; the `.sig`
+next to each is the base64 DER signature over SHA-256, made by `DomainOS/tools/sign-feed.sh`. Toolbox trusts a short
+list of public keys (`Updater.TrustedKeys`): a feed is accepted when its signature checks with **any** of them. The
+`.sig` format has not changed and carries no key id, so feeds signed with the main key keep working for every Toolbox
+version in the field; the new code simply tries each trusted key.
+
+| Key | Id (SHA-256 of the public key, first 16 hex) | Where the private half lives |
+|---|---|---|
+| main | `824da223f01c0905` | the author's PC (plus an offline backup copy) |
+| backup | `a807a74083942dde` | offline only (USB stick / paper) |
+
+`Updater.RevokedKeyIds` lists keys that must never be trusted again. It is checked against the fingerprint computed
+from the key itself, so a revoked key is refused even if it is still listed as trusted.
+
+**If the main key leaks or is lost:**
+
+1. Stop signing with it. Make a new key pair: `openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8
+   -nocrypt -out NEW.pem` (`chmod 600 NEW.pem`); its public key: `openssl pkey -in NEW.pem -pubout -outform DER | base64 -w0`.
+2. In `Updater.cs` the old backup becomes `PublicKey` (main), the new key becomes `BackupPublicKey`, the ids in
+   `TrustedKeys` are updated (the test `BuiltInKeyListIsConsistent` checks them), and a leaked key's id goes into
+   `RevokedKeyIds`. Build and test that Toolbox.
+3. Sign the feed that ships it with the backup key:
+   `DOMAINOS_SIGNING_KEY_BACKUP=/path/on/usb.pem sign-feed.sh --backup update/stable.json` (also `test.bin`).
+   Installed versions already trust the backup key, so they accept the feed and update to the version that no longer
+   trusts the compromised key.
+4. The old backup is now the main signing key; keep `NEW.pem` offline as the next backup; delete every copy of the
+   compromised key.
+
+If only the backup key is lost or leaked, ship a Toolbox with a new `BackupPublicKey` (and the old backup id in
+`RevokedKeyIds` if it leaked), signed with the main key as usual.
+
+**Telling users (the same day a key leak is known):** a revocation reaches a PC only with the Toolbox update that
+carries it, so until then a leaked key could sign a fake feed. To shorten that window:
+
+1. Pin a short notice in Discord **02・news** and **08・changelog**, open a GitHub security advisory in
+   6kane1/DomainOS and put a banner on the website: which key id leaked, since when, and what to do.
+2. What users do: update Toolbox at once (Update on the home page), or, until the fixed version is out, turn off
+   *Check for updates* in Settings and install nothing offered by Toolbox; the website and GitHub Releases (verify
+   with `gh attestation verify`) stay the trusted source.
+3. Publish the fixed Toolbox (signed with the backup key) as soon as it is built, and say so in the same places.
+4. Afterwards: in the changelog, name the revoked key id and the new key ids, and what happened.
+
+## Team
+
+- **6kane1** — author and owner of Domain OS.
+- **Zero Unflesh (zero_wake)** — co-owner of Domain OS and owner of AerialOS. Made a very large contribution to this project.
 
 ## License
 **Domain OS License** — all rights reserved (see [LICENSE](LICENSE)). You may read the code and use the official releases free of charge on your own PCs. Copying, re-uploading, publishing changed versions or builds based on this code, removing the author notices and selling are not allowed without the author's written permission. Versions published before 18 November 2026 under MIT stay MIT for the copies obtained then.

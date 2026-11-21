@@ -267,7 +267,7 @@ internal sealed class SettingsPage : Page
 		(string, string)[] array = new(string, string)[2]
 		{
 			("devices-write", L.T("Device interrupt policy write (Devices page)")),
-			("gpu-oc", L.T("GPU overclocking (clock offsets and voltage boost, NVIDIA)"))
+			("gpu-oc", L.T("GPU overclocking (NVIDIA: clock offsets and voltage boost; AMD Radeon: clocks, power limit and undervolt)"))
 		};
 		for (int i = 0; i < array.Length; i++)
 		{

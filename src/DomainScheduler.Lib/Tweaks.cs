@@ -35,7 +35,7 @@ public sealed class WinRegStore : IRegStore
 
     public void Set(string hive, string path, string name, string kind, string data)
     {
-        if (hive == "BCD") { Bcd($"/set {path} {name} {data}"); return; }
+        if (hive == "BCD") { Bcd("/set", path, name, data); return; }
         using var k = Root(hive).CreateSubKey(path, true);
         if (kind == "dword") k.SetValue(name, int.Parse(data, CultureInfo.InvariantCulture), RegistryValueKind.DWord);
         else if (kind == "binary") k.SetValue(name, Convert.FromHexString(data ?? ""), RegistryValueKind.Binary);
@@ -44,7 +44,7 @@ public sealed class WinRegStore : IRegStore
 
     public void Delete(string hive, string path, string name)
     {
-        if (hive == "BCD") { Bcd($"/deletevalue {path} {name}"); return; }
+        if (hive == "BCD") { Bcd("/deletevalue", path, name); return; }
         using var k = Root(hive).OpenSubKey(path, true);
         k?.DeleteValue(name, false);
     }
@@ -56,22 +56,34 @@ public sealed class WinRegStore : IRegStore
         return k != null;
     }
 
-    static string Bcd(string args)
+    /// <summary>
+    /// bcdedit with every part a separate, checked argument (no command line is put together from text): the entry is
+    /// "{current}" or another "{…}" identifier, the element a plain word, the value letters and digits only.
+    /// </summary>
+    static string Bcd(string verb, string entry, string element = null, string value = null)
     {
-        var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "bcdedit.exe"), args)
-            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        if (!BcdPart.IsMatch(entry ?? "") || !entry.StartsWith('{') || (element != null && !BcdPart.IsMatch(element)) || (value != null && !BcdPart.IsMatch(value)))
+            throw new InvalidOperationException("bcdedit: refused (not a boot entry, element or value this program uses)");
+        var psi = SysExe.Start("bcdedit.exe");
+        psi.ArgumentList.Add(verb);
+        psi.ArgumentList.Add(entry);
+        if (element != null) psi.ArgumentList.Add(element);
+        if (value != null) psi.ArgumentList.Add(value);
         using var p = Process.Start(psi)!;
-        string output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+        var err = p.StandardError.ReadToEndAsync();
+        string output = p.StandardOutput.ReadToEnd() + err.Result;
         p.WaitForExit(10000);
-        if (p.ExitCode != 0 && !args.StartsWith("/enum", StringComparison.Ordinal) && !args.StartsWith("/deletevalue", StringComparison.Ordinal))
-            throw new InvalidOperationException("bcdedit " + args + ": " + output.Trim());
+        if (p.ExitCode != 0 && verb != "/enum" && verb != "/deletevalue")
+            throw new InvalidOperationException("bcdedit " + verb + " " + entry + " " + element + ": " + output.Trim());
         return output;
     }
+
+    static readonly System.Text.RegularExpressions.Regex BcdPart = new(@"^(\{[A-Za-z0-9\-]{1,40}\}|[A-Za-z0-9]{1,40})$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     /// <summary>Element names in "bcdedit /enum" are not translated; the value is the second word of the line.</summary>
     static string BcdGet(string entry, string name)
     {
-        foreach (var line in Bcd("/enum " + entry).Split('\n'))
+        foreach (var line in Bcd("/enum", entry).Split('\n'))
         {
             var parts = line.Trim().Split((char[])null, 2, StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 2 && parts[0].Equals(name, StringComparison.OrdinalIgnoreCase)) return parts[1].Trim();
@@ -129,7 +141,7 @@ public static class Tweaks
 {
     public static IRegStore Reg = new WinRegStore();
     public static Func<string> BackupPathHook;
-    public static string BackupPath => BackupPathHook?.Invoke() ?? Path.Combine(Store.Dir, "system-changes-backup.json");
+    public static string BackupPath => BackupPathHook?.Invoke() ?? Path.Combine(Store.Dir, BackupName);
 
     const string Cdm = @"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager";
     const string Wu = @"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate";
@@ -368,6 +380,63 @@ public static class Tweaks
         return new();
     }
 
+    internal const string BackupName = "system-changes-backup.json";
+
+    /// <summary>
+    /// Whether a saved value may be written back for this change (pure): the change's own value name (the caller only
+    /// looks up its own changes), in the change's type — a 32-bit number for a DWORD, hex bytes for a binary value, a
+    /// short printable text for a string — and for the boot entry only "Auto". The retired security switches also
+    /// refuse a value that would keep a protection off: their "Disable…" values and the "Enabled" switches accept only
+    /// 0 / 1 (the value that turns them off is replaced by the Windows default anyway), SmartScreen only its own modes.
+    /// "\0" (there was no value) is always fine.
+    /// </summary>
+    public static bool Acceptable(RegChange c, string saved, bool retired)
+    {
+        if (saved == null || saved == "\0") return true;
+        if (c.Hive == "BCD") return saved.Equals("Auto", StringComparison.OrdinalIgnoreCase);
+        bool typeOk = c.Kind switch
+        {
+            "dword" => int.TryParse(saved, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _) || uint.TryParse(saved, NumberStyles.None, CultureInfo.InvariantCulture, out _),
+            "binary" => saved.Length <= 256 && saved.Length % 2 == 0 && saved.All(Uri.IsHexDigit),
+            _ => saved.Length <= 64 && !saved.Any(char.IsControl),
+        };
+        if (!typeOk) return false;
+        if (c.Name == "TargetReleaseVersionInfo") return System.Text.RegularExpressions.Regex.IsMatch(saved, @"^\d{2}H[12]$");
+        if (c.Name == "ProductVersion") return saved is "Windows 10" or "Windows 11";
+        if (!retired) return true;
+        if (c.Name == "SmartScreenEnabled") return saved is "Warn" or "RequireAdmin" or "Prompt" or "Off";
+        if (c.Name.StartsWith("Disable", StringComparison.Ordinal) || c.Name is "Enabled" or "EnableVirtualizationBasedSecurity") return saved is "0" or "1";
+        return true;
+    }
+
+    /// <summary>
+    /// Takes over the backup of an older version (from the user's folder): only changes of the catalogue or the retired
+    /// list, only their own values, only values <see cref="Acceptable"/> lets through. Null when nothing is left.
+    /// </summary>
+    internal static string ImportBackup(string json, string existing, List<string> dropped)
+    {
+        var src = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(json) ?? new();
+        var res = existing == null ? new Dictionary<string, Dictionary<string, string>>()
+            : JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(ImportBackup(existing, null, null) ?? "{}") ?? new();
+        var fresh = new Dictionary<string, Dictionary<string, string>>();
+        foreach (var (id, vals) in src)
+        {
+            var t = Catalog.Concat(Retired).FirstOrDefault(x => x.Id == id);
+            if (t == null || vals == null) { dropped?.Add(id); continue; }
+            bool retired = Retired.Contains(t);
+            var keep = new Dictionary<string, string>();
+            foreach (var (key, v) in vals)
+            {
+                var c = t.Changes.FirstOrDefault(x => string.Equals(Id(x), key, StringComparison.OrdinalIgnoreCase));
+                if (c != null && Acceptable(c, v, retired)) keep[Id(c)] = v;
+                else dropped?.Add(id + ": " + key);
+            }
+            fresh[id] = keep;      // an entry without values still says "this program switched it on"
+        }
+        foreach (var (k, v) in fresh) res.TryAdd(k, v);      // what the state folder already has wins
+        return res.Count == 0 ? null : JsonSerializer.Serialize(res, new JsonSerializerOptions { WriteIndented = true });
+    }
+
     static void SaveBackup(Dictionary<string, Dictionary<string, string>> b)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(BackupPath)!);
@@ -417,9 +486,16 @@ public static class Tweaks
         {
             var backup = LoadBackup();
             backup.TryGetValue(t.Id, out var saved);
+            bool retired = Retired.Contains(t);
             foreach (var c in Present(t))
             {
                 string want = saved != null && saved.TryGetValue(Id(c), out var s) ? (s == "\0" ? null : s) : c.Default;
+                // Only a value this change itself uses is written back; anything else falls back to the Windows default.
+                if (saved != null && saved.TryGetValue(Id(c), out var raw) && !Acceptable(c, raw, retired))
+                {
+                    AppLog.Add(L.F("System changes: the saved value of {0} is not one this change uses; the Windows default is written instead", c.Name), AppLog.Sev.Warn);
+                    want = c.Default;
+                }
                 // A backup taken while the change was already on would "restore" the change itself: the default is used then.
                 if (want != null && string.Equals(want, c.On, StringComparison.OrdinalIgnoreCase) && c.Default != c.On) want = c.Default;
                 string now = Reg.Get(c.Hive, c.Path, c.Name);

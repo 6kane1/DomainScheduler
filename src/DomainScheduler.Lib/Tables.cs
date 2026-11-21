@@ -48,7 +48,7 @@ public static class Tables
     }
 
     /// <summary>Parses and validates one file into the data; returns how many entries were rejected.</summary>
-    static int Merge(Data d, string json)
+    internal static int Merge(Data d, string json)
     {
         int bad = 0;
         using var doc = JsonDocument.Parse(json, new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
@@ -90,9 +90,9 @@ public static class Tables
             d.Error = e.Message;
             if (log) AppLog.Add(L.F("Built-in tables: {0}", e.Message), AppLog.Sev.Error);
         }
-        string path = OverridePath;
         try
         {
+            string path = OverridePath;
             if (File.Exists(path))
             {
                 var merged = new Data();
