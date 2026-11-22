@@ -383,8 +383,14 @@ public class RoadmapTests : IDisposable
             Assert.Equal(0xF000UL, irq.BusyCoresIfReady(x));
             _now = _now.AddSeconds(1);
         }
-        for (int s = 0; s < 45; s++) { irq.Add(12, 5); irq.BusyCoresIfReady(x); _now = _now.AddSeconds(1); }
-        Assert.Equal(0UL, irq.BusyCoresIfReady(x));             // quiet for longer than window + hold
+        for (int s = 0; s < 60; s++)                            // quiet: still kept for 60 s (Test 6), no flip-flop
+        {
+            irq.Add(12, 5);
+            Assert.Equal(0xF000UL, irq.BusyCoresIfReady(x));
+            _now = _now.AddSeconds(1);
+        }
+        for (int s = 0; s < 15; s++) { irq.Add(12, 5); irq.BusyCoresIfReady(x); _now = _now.AddSeconds(1); }
+        Assert.Equal(0UL, irq.BusyCoresIfReady(x));             // quiet for longer than window + 60 s
     }
 
     [Fact]
@@ -405,7 +411,9 @@ public class RoadmapTests : IDisposable
         }
         Assert.Equal(0x30UL, got);                              // the whole core 2 (processors 4 and 5), long before the busy-core rule
         for (int s = 0; s < 5; s++) { irq.Add(4, 0.5, 0x1500); got = irq.BusyCoresIfReady(x); _now = _now.AddSeconds(1); }
-        Assert.Equal(0UL, irq.GpuCores(x));                     // the driver went quiet there (0.05%): the core is free again
+        Assert.Equal(0x30UL, irq.GpuCores(x));                  // quiet for 5 s: still kept (Test 6: 60 s, no flip-flop)
+        for (int s = 0; s < 60; s++) { irq.Add(4, 0.5, 0x1500); got = irq.BusyCoresIfReady(x); _now = _now.AddSeconds(1); }
+        Assert.Equal(0UL, irq.GpuCores(x));                     // quiet (0.05%) for over 60 s: the core is free again
     }
 
     [Fact]

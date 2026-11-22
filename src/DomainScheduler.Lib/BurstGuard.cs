@@ -58,6 +58,11 @@ public static class BurstPolicy
         return want < (256UL << 20) ? 0 : want;
     }
 
+    /// <summary>1.16.1 Test 2: the game's hard page faults per second above which its memory is held (2 samples in a row).</summary>
+    public const double HardFaultsPerSec = 30;
+    /// <summary>If the hold did not bring the hard faults under half of the level that started it within this time, it is lifted.</summary>
+    public const int HoldCheckSec = 10;
+
     /// <summary>One sample of one program: the new count of heavy samples in a row.</summary>
     public static int NextStreak(int streak, double cores) => cores >= HeavyCores ? streak + 1 : 0;
 }
@@ -97,6 +102,9 @@ public sealed class BurstGuard
     DateTime _last;
     uint _game; long _gameCreated; bool _wsSet; ulong _wsMin0, _wsMax0;
     bool _pressureSeen;
+    int _faultHigh; double _faultsAtHold; DateTime _heldAt;
+    /// <summary>1.16.1 Test 2: the game's hard page faults per second from the wait probe (null = not measured: free-memory rule).</summary>
+    public Func<double?> GameHardFaults;
 
     /// <summary>The switch (setting BurstGuard; on by default since 1.16.0).</summary>
     public bool On;
@@ -180,8 +188,21 @@ public sealed class BurstGuard
             }
             foreach (var pid in _watch.Keys.Where(p => !seen.Contains(p)).ToList()) _watch.Remove(pid);
 
-            // Memory: the game's current working set becomes a hard minimum only under memory pressure.
-            if (touchGame && !_wsSet && _n.Memory(out ulong avail, out ulong total) && BurstPolicy.MemoryPressure(avail, total))
+            // Memory (1.16.1 Test 2): what hurts a frame is the game reading its own pages back from disk (hard faults),
+            // not the amount of free memory. With the probe running, the game's current working set becomes a hard minimum
+            // when its hard faults stay above HardFaultsPerSec, and the hold is lifted again if it did not help. Without
+            // the probe the old rule stays: only under low free memory.
+            double? hf = GameHardFaults?.Invoke();
+            if (_wsSet && hf != null && (now - _heldAt).TotalSeconds >= BurstPolicy.HoldCheckSec && hf.Value >= _faultsAtHold / 2)
+            {
+                if (_n.CpuTime(_game, out long crx, out _) && crx == _gameCreated) _n.SetWorkingSetMin(_game, _wsMin0, _wsMax0, hard: false);
+                _wsSet = false;
+                Log(L.F("Burst guard: holding the game's memory did not help (still {0:0} reads from disk per second); lifted", hf.Value), AppLog.Sev.Info);
+                _faultHigh = int.MinValue / 2;   // not again during this game
+            }
+            _faultHigh = hf != null && hf.Value > BurstPolicy.HardFaultsPerSec ? _faultHigh + 1 : Math.Min(_faultHigh, 0);
+            bool want = hf != null ? _faultHigh >= 2 : (_n.Memory(out ulong av0, out ulong tot0) && BurstPolicy.MemoryPressure(av0, tot0));
+            if (touchGame && !_wsSet && want && _n.Memory(out ulong avail, out ulong total))
             {
                 _pressureSeen = true;
                 if (_n.WorkingSet(game, out ulong ws, out ulong min0, out ulong max0))
@@ -189,8 +210,9 @@ public sealed class BurstGuard
                     ulong min = BurstPolicy.GameMinimum(ws, total);
                     if (min > 0 && _n.SetWorkingSetMin(game, min, Math.Max(max0, min + (256UL << 20)), hard: true))
                     {
-                        _wsSet = true; _wsMin0 = min0; _wsMax0 = max0;
-                        Log(L.F("Burst guard: little free memory ({0} MB); the game keeps its {1} MB in memory", avail >> 20, min >> 20), AppLog.Sev.Info);
+                        _wsSet = true; _wsMin0 = min0; _wsMax0 = max0; _heldAt = now; _faultsAtHold = hf ?? 0;
+                        if (hf != null) Log(L.F("Burst guard: the game read {0:0} of its own pages per second back from disk; it keeps its {1} MB in memory", hf.Value, min >> 20), AppLog.Sev.Info);
+                        else Log(L.F("Burst guard: little free memory ({0} MB); the game keeps its {1} MB in memory", avail >> 20, min >> 20), AppLog.Sev.Info);
                     }
                 }
             }
@@ -216,7 +238,7 @@ public sealed class BurstGuard
                 : L.T("Burst guard after the game: nothing was capped; free memory was low at times"), AppLog.Sev.Info);
         }
         _history.Clear();
-        _wsSet = false; _pressureSeen = false;
+        _wsSet = false; _pressureSeen = false; _faultHigh = 0;
         _watch.Clear();
         _game = 0; _gameCreated = 0; _last = default;
         if (had || StatePath != null) Save();

@@ -136,6 +136,50 @@ public class Top5Tests : IDisposable
         Assert.Equal(1, plan.Desired()[0].Prio);
     }
 
+    static Top5Plan.Cand W(uint tid, double share, double waitMs, ThreadRole role = ThreadRole.Worker) => new() { Tid = tid, Share = share, Role = role, WaitMs = waitMs };
+
+    [Fact]
+    public void AThreadThatWaitsForACoreEarnsASlotOverABusierOneThatDoesNot()
+    {
+        var plan = new Top5Plan();
+        plan.SetCores(new uint[] { 2, 4, 6, 8, 10, 12, 14 });
+        // thread 6 uses only 3% but waits 1.2 ms (p99); thread 5 uses 8% and never waits
+        var cands = new[] { W(1, 0.40, 0), W(2, 0.20, 0), W(3, 0.12, 0), W(4, 0.10, 0), W(5, 0.08, 0), W(6, 0.03, 1.2) };
+        DateTime t = _now;
+        for (int i = 0; i < 12; i++) plan.Step(t = t.AddSeconds(1), cands, null);
+        Assert.Contains(plan.Desired(), s => s.Tid == 6);
+        Assert.DoesNotContain(plan.Desired(), s => s.Tid == 5);
+        Assert.True(plan.WaitOf(6) > 1.0);
+        // without wait data the old ranking by load stays
+        var noWait = new Top5Plan(); noWait.SetCores(new uint[] { 2, 4, 6, 8, 10, 12, 14 });
+        var load = new[] { C(1, 0.40), C(2, 0.20), C(3, 0.12), C(4, 0.10), C(5, 0.08), C(6, 0.03) };
+        for (int i = 0; i < 12; i++) noWait.Step(t = t.AddSeconds(1), load, null);
+        Assert.Contains(noWait.Desired(), s => s.Tid == 5);
+    }
+
+    [Fact]
+    public void ASlotLeavesAProcessorDriversKeepBusyOrWhereItsThreadKeepsWaiting()
+    {
+        var plan = new Top5Plan();
+        plan.SetCores(new uint[] { 2, 4, 6, 8, 10, 12, 14 });
+        DateTime t = _now;
+        var irq = new Dictionary<uint, double>();
+        double Irq(uint lp) => irq.GetValueOrDefault(lp);
+        double None(uint lp) => 0;
+        var calm = new[] { W(1, 0.40, 0), W(2, 0.20, 0), W(3, 0.12, 0), W(4, 0.10, 0), W(5, 0.08, 0) };
+        for (int i = 0; i < 6; i++) plan.Step(t = t.AddSeconds(1), calm, None, Irq);
+        uint lp1 = plan.Desired().First(s => s.Tid == 1).LP;
+        irq[lp1] = 0.08;                                  // a driver takes 8% of that processor: not "foreign" programs
+        for (int i = 0; i < 4; i++) plan.Step(t = t.AddSeconds(1), calm, None, Irq);
+        uint moved = plan.Desired().First(s => s.Tid == 1).LP;
+        Assert.NotEqual(lp1, moved);
+        // a slot whose own thread keeps waiting moves too, though nothing else looks busy
+        uint lp3 = plan.Desired().First(s => s.Tid == 3).LP;
+        var waiting = new[] { W(1, 0.40, 0), W(2, 0.20, 0), W(3, 0.12, 0.9), W(4, 0.10, 0), W(5, 0.08, 0) };
+        for (int i = 0; i < 8; i++) plan.Step(t = t.AddSeconds(1), waiting, None, Irq);
+        Assert.NotEqual(lp3, plan.Desired().First(s => s.Tid == 3).LP);
+    }
+
     [Fact]
     public void ASlotLeavesAProcessorThatOtherWorkKeepsBusy()
     {

@@ -303,4 +303,15 @@ public class TesterKeyTests
         Assert.Null(Updater.ParseFeed(E(true, api, "short")).Toolbox);
         Assert.Null(Updater.ParseFeed("{\"toolbox\":{\"version\":\"1.16.0\",\"sealed\":true,\"url\":\"https://a/tb.bin\",\"sha256\":\"" + sha + "\",\"size\":9}}").Toolbox.Token);
     }
+
+    [Fact]
+    public void ASignedFeedFileSplitsIntoSignatureAndFeed()
+    {
+        byte[] feed = System.Text.Encoding.UTF8.GetBytes("{\"toolbox\":null}\n");
+        byte[] combined = System.Text.Encoding.ASCII.GetBytes("MEUCIQ==\n").Concat(feed).ToArray();
+        Assert.Equal(feed, Updater.SplitSigned(combined, out string sig));
+        Assert.Equal("MEUCIQ==", sig);
+        Assert.Null(Updater.SplitSigned(feed.Skip(1).ToArray().Prepend((byte)'\n').ToArray(), out _));   // no signature line
+        Assert.Null(Updater.SplitSigned(null, out _));
+    }
 }

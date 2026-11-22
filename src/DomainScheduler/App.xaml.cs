@@ -209,6 +209,8 @@ public partial class App : Application
 		};
 		GameMask.IrqSource = Devices.PinnedIrqs;
 		EtwIrq.StopOrphan();
+		BlackBox.StopOrphan();
+		ReadyProbe.StopOrphan();
 		EtwIrq.StopOrphanSched();
 		System.Threading.Tasks.Task.Run(SafetyAtStart);
 		System.Threading.Tasks.Task.Run(() =>
@@ -479,6 +481,8 @@ public partial class App : Application
 		_hub.Opt?.Dispose();
 		_hub.Frames?.Dispose();
 		_hub.Irq.Dispose();
+		_hub.Box.Dispose();
+		_hub.Waits.Dispose();
 		try { string d = DefenderGameExclusion.RemoveAll(); if (d.Length > 0) AppLog.Add(d); } catch (Exception) { }
 		try { string p = GamePower.Restore(); if (p.Length > 0) AppLog.Add(p); } catch (Exception) { }
 		_tray?.Dispose();

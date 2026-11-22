@@ -30,6 +30,16 @@ internal sealed class Hub
 
 	public readonly EtwIrq Irq = new EtwIrq();
 
+	/// <summary>1.16.1 Test 1: the black box (flight recorder of the game; explains stutters).</summary>
+	public readonly BlackBox Box = new BlackBox();
+
+	/// <summary>1.16.1 Test 2: short kernel-trace windows while Auto handles a game: the game threads' waits and hard faults.</summary>
+	public readonly ReadyProbe Waits = new ReadyProbe();
+	public bool ProbeOn = true;
+	public bool BlackBoxOn = true;
+	/// <summary>A new explained stutter (UI thread subscribes).</summary>
+	public event Action<BbReport> BoxReport;
+
 	public volatile bool BgOn = true;
 
 	public ulong GameMaskValue;
@@ -446,6 +456,8 @@ internal sealed class Hub
 		// Live DPC/ISR runs only while a game is handled (LiveTick); the old per-processor hook is not used.
 		GameMask.NoisyHook = null;
 		LiveIrqOn = Settings.GetBool("LiveIrq", fallback: true);
+		BlackBoxOn = Settings.GetBool("BlackBox", fallback: true);
+		ProbeOn = Settings.GetBool("WaitProbe", fallback: true);
 		LiveIrqMask = Settings.GetBool("LiveIrqMask", fallback: true);
 		string maskName = "auto";
 		GameMaskValue = 0uL;
@@ -605,6 +617,8 @@ internal sealed class Hub
 	/// <summary>Once a second on the worker: starts the live trace when a game is handled, stops it when none is.</summary>
 	public void LiveTick()
 	{
+		BoxTick();
+		ProbeTick();
 		bool game = Auto.GamePid != 0 || Auto.BackgroundStandalone;
 		if (!LiveIrqOn || !game)
 		{
@@ -622,6 +636,57 @@ internal sealed class Hub
 		if (!Irq.Available) { GameMask.BusyHook = null; return; }
 		GameMask.BusyHook = LiveIrqMask ? new Func<Topo, ulong?>(Irq.BusyCoresIfReady) : null;
 		if (++_liveTicks % 60 == 0) ReportLong();
+	}
+
+	/// <summary>
+	/// Once a second: the wait probe runs while Auto handles a game and feeds Dynamic Top-5 (waits, interrupt shares)
+	/// and the burst guard (hard faults). Off or unavailable: Top-5 ranks by load only and the guard uses free memory.
+	/// </summary>
+	void ProbeTick()
+	{
+		try
+		{
+			uint pid = Auto.GamePid;
+			var dyn = Auto.Dynamic;
+			if (!ProbeOn || pid == 0)
+			{
+				if (Waits.Running) Waits.Stop();
+				if (dyn != null) dyn.WaitOf = null;
+				Burst.GameHardFaults = null;
+				if (dyn != null) dyn.IrqShares = Irq.Available ? Irq.Shares : null;
+				return;
+			}
+			if (!Waits.Running || Waits.GamePid != pid)
+			{
+				Waits.Start(pid);
+				if (!Waits.Running) { ProbeOn = false; AppLog.Add(L.F("Wait probe is not available: {0}", Waits.Error), AppLog.Sev.Warn); return; }
+				AppLog.Add(L.T("Wait probe: on (Top-5 ranks the game's threads by their waits too)"));
+			}
+			Waits.Tick();
+			if (dyn != null) { dyn.WaitOf = Waits.WaitP99Ms; dyn.IrqShares = Irq.Available ? Irq.Shares : null; }
+			Burst.GameHardFaults = () => Waits.HardFaultsPerSec;
+		}
+		catch (Exception ex) { AppLog.Add(L.F("Wait probe: {0}", ex.Message), AppLog.Sev.Warn); }
+	}
+
+	/// <summary>Once a second: the black box records while Auto handles a game and explains a stutter when one is found.</summary>
+	void BoxTick()
+	{
+		try
+		{
+			uint pid = Auto.GamePid;
+			if (!BlackBoxOn || pid == 0) { if (Box.Running) Box.Stop(); return; }
+			if (!Box.Running || Box.GamePid != pid)
+			{
+				Box.RefreshHz = BlackBox.MonitorHz();
+				if (Box.Folder == null) Box.Folder = System.IO.Path.Combine(Store.Dir, "blackbox");
+				Box.Start(pid, Auto.GameExe);
+				if (!Box.Running) { BlackBoxOn = false; AppLog.Add(L.F("Black box is not available: {0}", Box.Error), AppLog.Sev.Warn); return; }
+			}
+			var r = Box.Tick();
+			if (r != null) { AppLog.Add(L.F("Black box: stutter {0:0.0} ms, {1}", r.FrameMs, L.Lang == "ru" ? r.TextRu : r.TextEn)); BoxReport?.Invoke(r); }
+		}
+		catch (Exception ex) { AppLog.Add(L.F("Black box: {0}", ex.Message), AppLog.Sev.Warn); }
 	}
 
 	/// <summary>The latency watchdog: long DPCs/interrupts of the last minute, per driver, into the log.</summary>

@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 
 namespace DomainScheduler;
 
@@ -11,6 +11,11 @@ internal static class Top5Policy
     public const double MinScore = 0.03;        // below this a thread is not worth a slot
     public const double Margin = 0.15;          // how much better a challenger must be
     public const double ForeignBusy = 0.20, ForeignQuiet = 0.10;
+    // 1.16.1 Test 2: the game's own pain and the interrupt tax are separate signals.
+    public const double WaitWeight = 0.30;      // a thread whose p99 ready wait reaches WaitFullMs gets +0.30 (like a 30% share)
+    public const double WaitFullMs = 1.0;
+    public const double OwnWaitMs = 0.5;        // a slot's own p99 wait above this for ForeignHoldTicks: it leaves its processor
+    public const double IrqBusy = 0.05;         // DPC/ISR share of a processor above this: the slot leaves it (4% = a busy interrupt core)
     public const double BonusMain = 0.15, BonusRender = 0.10, BonusAudio = 0.08;
 }
 
@@ -40,9 +45,11 @@ public sealed class Top5Plan
         public uint Tid;
         public double Share;
         public ThreadRole Role;
+        /// <summary>p99 ready wait of the thread in the last probe window (ms); -1 = not measured.</summary>
+        public double WaitMs = -1;
     }
 
-    readonly Dictionary<uint, double> _ema = new();
+    readonly Dictionary<uint, double> _ema = new(), _wait = new();
     readonly Dictionary<uint, ThreadRole> _role = new();
     readonly Dictionary<uint, int> _lead = new(), _low = new();
     readonly Dictionary<uint, DateTime> _moved = new(), _since = new();
@@ -73,7 +80,12 @@ public sealed class Top5Plan
         _ => 0,
     };
 
-    double Score(uint tid) => _ema.TryGetValue(tid, out double e) ? e + Bonus(_role.GetValueOrDefault(tid, ThreadRole.Aux)) : 0;
+    double Score(uint tid) => _ema.TryGetValue(tid, out double e)
+        ? e + Bonus(_role.GetValueOrDefault(tid, ThreadRole.Aux)) + Top5Policy.WaitWeight * Math.Min(1.0, _wait.GetValueOrDefault(tid) / Top5Policy.WaitFullMs)
+        : 0;
+
+    /// <summary>The smoothed p99 ready wait of a thread (ms), 0 when never measured.</summary>
+    public double WaitOf(uint tid) => _wait.GetValueOrDefault(tid);
 
     bool Locked(uint tid, DateTime now) => _moved.TryGetValue(tid, out var at) && (now - at).TotalMilliseconds < Top5Policy.DwellMs;
 
@@ -88,7 +100,7 @@ public sealed class Top5Plan
     }
 
     /// <summary>One tick: the candidates with their share of the process' load, the foreign load of a processor (0..1).</summary>
-    public int Step(DateTime now, IReadOnlyList<Cand> cands, Func<uint, double> foreign)
+    public int Step(DateTime now, IReadOnlyList<Cand> cands, Func<uint, double> foreign, Func<uint, double> irq = null)
     {
         Events.Clear();
         int budget = Top5Policy.MaxMovesPerTick, moves = 0;
@@ -98,10 +110,12 @@ public sealed class Top5Plan
             alive.Add(c.Tid);
             _role[c.Tid] = c.Role;
             _ema[c.Tid] = _ema.TryGetValue(c.Tid, out double e) ? e + Top5Policy.Alpha * (c.Share - e) : c.Share;
+            if (c.WaitMs >= 0) _wait[c.Tid] = _wait.TryGetValue(c.Tid, out double w) ? w + Top5Policy.Alpha * (c.WaitMs - w) : c.WaitMs;
         }
         foreach (var gone in _ema.Keys.Where(k => !alive.Contains(k)).ToList())
         {
             _ema.Remove(gone);
+            _wait.Remove(gone);
             _role.Remove(gone);
             _lead.Remove(gone);
             _low.Remove(gone);
@@ -190,13 +204,18 @@ public sealed class Top5Plan
                 : L.F("slots {0} and {1}: threads {2} and {3} swap", i + 1, i + 2, b, a));
         }
 
-        // A slot leaves a processor that other work keeps busy, for the quietest spare one.
-        for (int i = 0; i < _slots && foreign != null; i++)
+        // A slot leaves its processor when (1.16.1 Test 2, three separate reasons): other programs keep it busy, drivers
+        // take more than IrqBusy of it in DPC/ISR, or the slot's own thread keeps waiting for it (p99 > OwnWaitMs).
+        // It goes to the quietest spare processor (other work plus interrupt time).
+        Func<uint, double> irqOf = irq ?? (_ => 0);
+        for (int i = 0; i < _slots && (foreign != null || irq != null || _wait.Count > 0); i++)
         {
             if (_tid[i] == 0) { _foreignHold[i] = 0; continue; }
-            _foreignHold[i] = foreign(_lp[i]) > Top5Policy.ForeignBusy ? _foreignHold[i] + 1 : 0;
+            double f = foreign?.Invoke(_lp[i]) ?? 0, q = irqOf(_lp[i]), w = _wait.GetValueOrDefault(_tid[i]);
+            string why = f > Top5Policy.ForeignBusy ? "other" : q > Top5Policy.IrqBusy ? "irq" : w > Top5Policy.OwnWaitMs ? "wait" : null;
+            _foreignHold[i] = why != null ? _foreignHold[i] + 1 : 0;
             if (_foreignHold[i] < Top5Policy.ForeignHoldTicks || budget <= 0 || Locked(_tid[i], now)) continue;
-            var quiet = _spare.Select(lp => (lp, f: foreign(lp))).Where(x => x.f < Top5Policy.ForeignQuiet).OrderBy(x => x.f).ThenBy(x => x.lp).ToList();
+            var quiet = _spare.Select(lp => (lp, f: (foreign?.Invoke(lp) ?? 0) + irqOf(lp))).Where(x => x.f < Top5Policy.ForeignQuiet && irqOf(x.lp) <= Top5Policy.IrqBusy).OrderBy(x => x.f).ThenBy(x => x.lp).ToList();
             if (quiet.Count == 0) continue;
             uint old = _lp[i];
             _spare.Remove(quiet[0].lp);
@@ -206,7 +225,9 @@ public sealed class Top5Plan
             _foreignHold[i] = 0;
             budget--;
             moves++;
-            Events.Add(L.F("slot {0}: processor {1} is busy with other work, moved to {2}", i + 1, old, quiet[0].lp));
+            Events.Add(why == "irq" ? L.F("slot {0}: drivers take processor {1} ({2:0}% in DPC/ISR), moved to {3}", i + 1, old, q * 100, quiet[0].lp)
+                     : why == "wait" ? L.F("slot {0}: thread {1} kept waiting for processor {2} ({3:0.00} ms), moved to {4}", i + 1, _tid[i], old, w, quiet[0].lp)
+                     : L.F("slot {0}: processor {1} is busy with other work, moved to {2}", i + 1, old, quiet[0].lp));
         }
         Moves += moves;
         return moves;
@@ -241,6 +262,11 @@ public sealed class Top5Plan
 /// </summary>
 public sealed class Top5 : IDisposable
 {
+    /// <summary>1.16.1 Test 2: p99 ready wait (ms) of a game thread from the wait probe; null or -1 = unknown.</summary>
+    public Func<uint, double> WaitOf;
+    /// <summary>1.16.1 Test 2: DPC/ISR share (0..1) per processor from the live interrupt trace; null = unknown.</summary>
+    public Func<double[]> IrqShares;
+
     sealed class H
     {
         public IntPtr Handle;
@@ -397,10 +423,10 @@ public sealed class Top5 : IDisposable
             var cands = new List<Top5Plan.Cand>();
             foreach (var (tid, d) in delta)
                 if (_meta.TryGetValue(tid, out var m) && m.Born == _h[tid].Born)
-                    cands.Add(new Top5Plan.Cand { Tid = tid, Share = (double)d / total, Role = m.Role });
+                    cands.Add(new Top5Plan.Cand { Tid = tid, Share = (double)d / total, Role = m.Role, WaitMs = WaitOf?.Invoke(tid) ?? -1 });
 
             // Foreign load of a processor: everything on it except the thread the slot holds there.
-            Func<uint, double> foreign = null;
+            Func<uint, double> foreign = null, irqOf = null;
             if (_n.CpuTimes(out long[] idle, out long[] tot) && _idle != null && _idle.Length == idle.Length)
             {
                 var busy = new double[idle.Length];
@@ -410,12 +436,16 @@ public sealed class Top5 : IDisposable
                     busy[i] = dTot > 0 ? Math.Clamp(1.0 - (double)dIdle / dTot, 0, 1) : 0;
                 }
                 var own = _applied.GroupBy(a => a.Value.Lp).ToDictionary(g => g.Key, g => g.Sum(a => cpuShare.GetValueOrDefault(a.Key)));
-                foreign = lp => lp < busy.Length ? Math.Max(0, busy[lp] - own.GetValueOrDefault(lp)) : 0;
+                // 1.16.1 Test 2: DPC/ISR time is not idle time, so "busy" holds the interrupt tax too; it is taken out here
+                // and handed to the plan as its own signal (a driver is not fixed the way a busy program is).
+                var irq = IrqShares?.Invoke();
+                irqOf = lp => irq != null && lp < irq.Length ? irq[lp] : 0;
+                foreign = lp => lp < busy.Length ? Math.Max(0, busy[lp] - own.GetValueOrDefault(lp) - irqOf(lp)) : 0;
             }
             _idle = idle;
             _total = tot;
 
-            int moves = _plan.Step(now, cands, foreign);
+            int moves = _plan.Step(now, cands, foreign, irqOf);
             foreach (var ev in _plan.Events)
             {
                 _log.AddFirst(now.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture) + "  " + ev);

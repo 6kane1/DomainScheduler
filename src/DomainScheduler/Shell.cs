@@ -228,6 +228,7 @@ internal sealed class Shell : Window
 		_pages.Add(new QuickPage(hub, this));
 		_pages.Add(new MasksPage(hub, this));
 		_pages.Add(new GameThreadsPage(hub, this));
+		_pages.Add(new BlackBoxPage(hub, this));
 		_pages.Add(new ProcessesPage(hub, this));
 		_pages.Add(new ChangesPage(hub, this));
 		_pages.Add(new CheckPage(hub, this));

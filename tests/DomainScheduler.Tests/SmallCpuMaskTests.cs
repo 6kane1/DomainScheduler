@@ -9,7 +9,7 @@ public class SmallCpuMaskTests
     [Fact]
     public void SixCoresOrFewerKeepAllCores()
     {
-        Assert.False(AutoLogic.KeepsAllCores(Synth.X7800X3D(), "auto"));   // 8 cores: the mask as before
+        Assert.True(AutoLogic.KeepsAllCores(Synth.X7800X3D(), "auto"));    // 1.16.1 Test 4: one cache domain, any core count
         Assert.True(AutoLogic.KeepsAllCores(Synth.I12400(), "auto"));
         Assert.True(AutoLogic.KeepsAllCores(Synth.Six(), null));
     }

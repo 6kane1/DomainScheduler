@@ -1,4 +1,4 @@
-using System.Net.Http;
+﻿using System.Net.Http;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -405,9 +405,37 @@ public static class Updater
     }
 
     /// <summary>A feed file and its signature; null when it is not there (404). Throws when the signature is missing or wrong.</summary>
+    /// <summary>
+    /// 1.16.1 Test 4: the feed and its signature in ONE file, "&lt;name&gt;.signed" = the base64 signature, a newline, then
+    /// the feed bytes. The site's cache keeps every file up to 10 minutes on its own and ignores the query string, so
+    /// right after a publish it could hand out the new feed with the old .sig ("no valid signature"). One file cannot
+    /// mix versions. Null when the site has no such file (older publishers): the separate pair is used then.
+    /// </summary>
+    internal static byte[] SplitSigned(byte[] combined, out string sig)
+    {
+        sig = null;
+        if (combined == null) return null;
+        int nl = Array.IndexOf(combined, (byte)'\n');
+        if (nl <= 0 || nl > 512) return null;
+        sig = System.Text.Encoding.ASCII.GetString(combined, 0, nl).Trim();
+        return combined.AsSpan(nl + 1).ToArray();
+    }
+
     static async Task<byte[]> Fetch(HttpClient http, string name, CancellationToken ct)
     {
         string q = "?t=" + DateTime.UtcNow.Ticks / TimeSpan.TicksPerMinute;
+        try
+        {
+            byte[] combined = await http.GetByteArrayAsync(FeedBase + name + ".signed" + q, ct);
+            byte[] feed = SplitSigned(combined, out string s1);
+            if (feed != null && Verify(feed, s1)) return feed;
+        }
+        catch (HttpRequestException) { }
+        return await FetchPair(http, name, q, ct);
+    }
+
+    static async Task<byte[]> FetchPair(HttpClient http, string name, string q, CancellationToken ct)
+    {
         byte[] body;
         try { body = await http.GetByteArrayAsync(FeedBase + name + q, ct); }
         catch (HttpRequestException e) when (e.StatusCode == System.Net.HttpStatusCode.NotFound) { return null; }

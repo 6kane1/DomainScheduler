@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace DomainScheduler;
 
@@ -25,6 +25,12 @@ public sealed class EtwIrq : IDisposable
     /// </summary>
     public const double GpuShare = 0.002;
     public const int GpuSeconds = 3;
+    /// <summary>
+    /// 1.16.1 Test 6: a graphics-driver core stays marked until the driver has been quiet on it for this long, and a
+    /// busy interrupt core is let go only after it stayed calm this long (it is still taken after 20 s). The owner's
+    /// log showed both sets flipping every 5-45 s in CS2, and every flip may move the game's Top-5 threads.
+    /// </summary>
+    public const int KeepSeconds = 60;
     static readonly string[] GpuDrivers = { "nvlddmkm", "amdkmdag", "atikmdag", "igdkmd", "dxgkrnl", "dxgmms" };
     const string SessionName = "DomainScheduler-Irq";
 
@@ -282,11 +288,20 @@ public sealed class EtwIrq : IDisposable
     {
         if (!Available || t?.Sets == null) return 0;
         var share = GpuShares();
+        var now = Now();
         ulong m = 0;
-        foreach (var core in t.Sets.Where(x => x.Group == 0 && x.LP < 64).GroupBy(x => x.Core))
-            if (core.Max(x => share[x.LP]) >= GpuShare) m |= TopoBuilder.Mask(core);
+        lock (_gate)
+            foreach (var core in t.Sets.Where(x => x.Group == 0 && x.LP < 64).GroupBy(x => x.Core))
+            {
+                ulong cm = TopoBuilder.Mask(core);
+                if (core.Max(x => share[x.LP]) >= GpuShare) _gpuSeen[core.Min(x => x.LP)] = now;
+                var seen = _gpuSeen[core.Min(x => x.LP)];
+                if (seen != default && (now - seen).TotalSeconds < KeepSeconds) m |= cm;
+            }
         return m;
     }
+
+    readonly DateTime[] _gpuSeen = new DateTime[64];
 
     /// <summary>Tests: driver load addresses without Windows.</summary>
     internal void SetDrivers(List<(ulong Base, string Name)> drivers) { _drivers = drivers; _gpuRoutine.Clear(); }
@@ -321,7 +336,9 @@ public sealed class EtwIrq : IDisposable
             }
             if (next == _busy && _ready) { _candidate = next; return _busy; }
             if (next != _candidate || _candidateSince == default) { _candidate = next; _candidateSince = now; return _busy; }
-            if (_ready && (now - _candidateSince).TotalSeconds >= BusyHoldSeconds)
+            // a core joins after the new set held 20 s; a core leaves only after the smaller set held 60 s
+            bool onlyLeaving = (next & ~_busy) == 0;
+            if (_ready && (now - _candidateSince).TotalSeconds >= (onlyLeaving ? KeepSeconds : BusyHoldSeconds))
             {
                 ulong old = _busy;
                 _busy = next;

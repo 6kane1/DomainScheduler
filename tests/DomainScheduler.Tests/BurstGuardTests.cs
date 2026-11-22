@@ -140,4 +140,24 @@ public class BurstGuardTests
         for (int i = 0; i < 3; i++) { adv(2); n.Burn(20, 1, 2); g.Tick(99, 9, true, cands, 1); }
         Assert.Equal(0, n.LastWeight);
     }
+
+    [Fact]
+    public void WithTheProbeTheGameMemoryIsHeldOnHardFaultsAndLiftedWhenItDoesNotHelp()
+    {
+        var (g, n, _, adv) = Make();
+        n.Procs[99] = (9, 0);
+        double? hf = 5;
+        g.GameHardFaults = () => hf;
+        n.Avail = 1;                                        // little free memory, but the game does not fault: no hold
+        for (int i = 0; i < 3; i++) { adv(2); g.Tick(99, 9, true, Array.Empty<(uint, string)>(), 1); }
+        Assert.Null(n.SetWs);
+        hf = 80;                                            // the game reads its pages back from disk
+        adv(2); g.Tick(99, 9, true, Array.Empty<(uint, string)>(), 1);
+        Assert.Null(n.SetWs);                               // one sample is not enough
+        adv(2); g.Tick(99, 9, true, Array.Empty<(uint, string)>(), 1);
+        Assert.True(n.SetWs!.Value.Hard);
+        hf = 70;                                            // 10 s later still high: the hold did not help, lifted
+        for (int i = 0; i < 6; i++) { adv(2); g.Tick(99, 9, true, Array.Empty<(uint, string)>(), 1); }
+        Assert.False(n.SetWs!.Value.Hard);
+    }
 }

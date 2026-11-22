@@ -145,7 +145,18 @@ offers a small, careful overclock with named profiles, one of which can be appli
 
 ## Project status
 
-Released version: **1.16.0** (shipped with playbook 2.3.0, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)). New since 1.15.0:
+Released version: **1.16.1** (shipped with playbook 2.3.1, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)). New since 1.16.0:
+
+- **Wait probe** (Settings, on): while Auto handles a game, the kernel trace adds context switches, ready threads and hard page faults for 250 ms every 2 s. Dynamic Top-5 ranks the game's threads by load **and** by their p99 wait for a core (a thread that waits 1 ms counts like a 30% share), and a slot leaves its processor for one of three separate reasons: other programs keep it busy (without the interrupt time), drivers take more than 5% of it in DPC/ISR, or its own thread keeps waiting (p99 above 0.5 ms).
+- **Core mask**: processors with one cache domain and no E-cores give the game every core at any core count (6 or fewer before). On the owner's 7800X3D the mask made the main game threads wait for a core 13 times per 30 s in CS2 deathmatch, the longest wait 940 µs (202 µs without), with 1% / 0.1% low equal. A **Core mask** button on the game threads page switches it off or on in one click (Auto picks it up within ~10 s), with a short guide on testing it.
+- **Graphics-driver and interrupt cores held 60 s**: a driver core stays marked until the driver was quiet on it for 60 s, a busy interrupt core is let go after 60 s of calm (taken after 20 s), so the game's threads are no longer moved every few seconds.
+- **Burst guard and memory**: the game's memory is held only when the game reads more than 30 of its own pages per second back from disk, and the hold is lifted after 10 s if it did not halve them.
+- **Black box** (page in the Scheduler section, switch in Settings, on): Windows' kernel trace and the game's frames stay in memory for about 30 s; a frame longer than 3x the median and two refreshes is explained in plain words (game or GPU, driver, another program, not enough free cores) with advice; frames of 100 ms and more are loading; Windows' own processes never get "close it" advice. Only reads, nothing on disk but small JSON reports (last 50).
+- Update feeds also come as one file with the signature inside (`*.signed`); the language switch no longer fails on the status panel.
+
+Measured on the owner's Ryzen 7 7800X3D + RTX 5060 (CS2 deathmatch, 3 runs of 30 s, mask off): 1% low 429, 0.1% low 230, the longest wait of a game thread for a core 183 µs, no wait of a main game thread over 0.5 ms.
+
+Previous version **1.16.0** (shipped with playbook 2.3.0). New since 1.15.0:
 
 - **Updates and testing**: one page for the update check, rolling back to the previous version, the tester key and the update channel (they were in About and Settings).
 - **Dynamic Top-5 is the only thread mode**: the role plan is removed, in the owner's measurements it only made things worse.
@@ -154,7 +165,7 @@ Released version: **1.16.0** (shipped with playbook 2.3.0, built and attested by
 - **6 cores or fewer** (one cache domain, no E-cores): Auto gives the game every core and the device layout gives no device a core of its own. On a tester's i5-10400F the old mask cost 6% of the 1% low in CS2. 8 cores and more work as in 1.15.0. Setting `AutoMask` auto | on | off (`--auto-mask`), `--auto on|off|status` for scripted measurements.
 - Check page (one measured run), crash memory of the GPU overclock, own load per thread, shorter texts in Settings.
 
-Test builds are encrypted and live in a private repository that only the owner and invited testers can see. 261 automated tests run against a simulated Windows (`dotnet test tests/DomainScheduler.Tests`), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
+Test builds are encrypted and live in a private repository that only the owner and invited testers can see. 273 automated tests run against a simulated Windows (`dotnet test tests/DomainScheduler.Tests`), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
 
 ## Build from source
 

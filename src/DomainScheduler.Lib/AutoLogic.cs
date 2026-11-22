@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 
 namespace DomainScheduler;
 
@@ -58,20 +58,22 @@ public static class AutoLogic
     }
 
     /// <summary>
-    /// 1.16.0-test1.7: on a processor with 6 cores or fewer (one cache domain, no E-cores) the game keeps every
-    /// processor; 8 cores and more keep the mask as before (owner's decision). Measurements (21.11.2026): a tester's
-    /// i5-10400F (6 cores) lost 6% of its 1% low with the mask; on a 7800X3D the mask made the game's main threads wait
-    /// for a core 11-49 times per 30 s in CS2 deathmatch. Setting "AutoMask": auto (this rule), on (always the mask),
-    /// off (never a mask).
+    /// 1.16.1 Test 4: a processor with ONE cache domain and no E-cores keeps every processor for the game, at any core
+    /// count (6 or fewer before). The mask only helps where it separates something: two CCDs (the V-Cache die) or P- and
+    /// E-cores. Measurements (owner's 7800X3D, CS2 deathmatch, 22.11.2026, mask off/on alternated in one session, 3 runs
+    /// each): without the mask the game's main threads never waited for a core longer than 0.5 ms (13 times per 30 s
+    /// with it), the longest wait fell from 940 to 202 µs, the longest frame from 14.6 to 11.3 ms; 1% / 0.1% low equal,
+    /// runs far steadier. Earlier: a tester's i5-10400F (6 cores) lost 6% of its 1% low with the mask.
+    /// Setting "AutoMask": auto (this rule), on (always the mask), off (never a mask); the Core mask button sets on/off.
     /// </summary>
-    public const int SmallCpuCores = 6;
+    public const int SmallCpuCores = 6;   // kept for the device layout (IrqLayout): no device cores on 6 cores or fewer
 
     public static bool KeepsAllCores(Topo t, string setting)
     {
         setting = (setting ?? "").Trim().ToLowerInvariant();
         if (setting == "off") return true;
         if (setting == "on" || t == null) return false;
-        return !t.Hybrid && t.PhysicalCount > 0 && t.PhysicalCount <= SmallCpuCores && (t.LLCGroups?.Count ?? 1) <= 1;
+        return !t.Hybrid && t.PhysicalCount > 0 && (t.LLCGroups?.Count ?? 1) <= 1;
     }
 
     public static MaskPlan AllCores(Topo t, MaskPlan mp)

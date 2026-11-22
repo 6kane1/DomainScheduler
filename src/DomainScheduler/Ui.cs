@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -205,6 +205,9 @@ internal static class Ui
 		{
 			Margin = new Thickness(0.0, 0.0, 0.0, 0.0)
 		};
+		// The value block is reused when the texts are rebuilt (language switch): take it out of its old row first,
+		// or WPF refuses ("already the logical child of another element").
+		if (v.Parent is Panel old) old.Children.Remove(v);
 		v.FontFamily = Mono;
 		v.Foreground = B("Strong");
 		DockPanel.SetDock(v, Dock.Right);
