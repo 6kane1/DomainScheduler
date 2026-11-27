@@ -28,7 +28,7 @@ storage, the command-line switches and the scheduled task of the C# Toolbox 1.16
   threads a preferred core each and lowers background programs.
 - **Dynamic Top-5.** The five busiest threads of the game are re-ranked every second and moved
   between cores and priorities as the load changes. (The older "role plan" mode was removed in
-  1.16.0 Test 1.9: in the owner's measurements it only made things worse.)
+  1.16.0 Test 1.9: in the developer's measurements it only made things worse.)
 - **Watchlist and denylist.** Only programs you mark are tuned. System-critical processes and
   anti-cheat software are never opened or changed.
 - **Background layer.** While a watched game runs, other programs get Below-normal priority,
@@ -167,24 +167,24 @@ Released version: **1.17.0** (shipped with playbook 2.3.2, built and attested by
 Version **1.16.1** (shipped with playbook 2.3.1). New since 1.16.0:
 
 - **Wait probe** (Settings, on): while Auto handles a game, the kernel trace adds context switches, ready threads and hard page faults for 250 ms every 2 s. Dynamic Top-5 ranks the game's threads by load **and** by their p99 wait for a core (a thread that waits 1 ms counts like a 30% share), and a slot leaves its processor for one of three separate reasons: other programs keep it busy (without the interrupt time), drivers take more than 5% of it in DPC/ISR, or its own thread keeps waiting (p99 above 0.5 ms).
-- **Core mask**: processors with one cache domain and no E-cores give the game every core at any core count (6 or fewer before). On the owner's 7800X3D the mask made the main game threads wait for a core 13 times per 30 s in CS2 deathmatch, the longest wait 940 µs (202 µs without), with 1% / 0.1% low equal. A **Core mask** button on the game threads page switches it off or on in one click (Auto picks it up within ~10 s), with a short guide on testing it.
+- **Core mask**: processors with one cache domain and no E-cores give the game every core at any core count (6 or fewer before). On the developer's 7800X3D the mask made the main game threads wait for a core 13 times per 30 s in CS2 deathmatch, the longest wait 940 µs (202 µs without), with 1% / 0.1% low equal. A **Core mask** button on the game threads page switches it off or on in one click (Auto picks it up within ~10 s), with a short guide on testing it.
 - **Graphics-driver and interrupt cores held 60 s**: a driver core stays marked until the driver was quiet on it for 60 s, a busy interrupt core is let go after 60 s of calm (taken after 20 s), so the game's threads are no longer moved every few seconds.
 - **Burst guard and memory**: the game's memory is held only when the game reads more than 30 of its own pages per second back from disk, and the hold is lifted after 10 s if it did not halve them.
 - **Black box** (page in the Scheduler section, switch in Settings, on): Windows' kernel trace and the game's frames stay in memory for about 30 s; a frame longer than 3x the median and two refreshes is explained in plain words (game or GPU, driver, another program, not enough free cores) with advice; frames of 100 ms and more are loading; Windows' own processes never get "close it" advice. Only reads, nothing on disk but small JSON reports (last 50).
 - Update feeds also come as one file with the signature inside (`*.signed`); the language switch no longer fails on the status panel.
 
-Measured on the owner's Ryzen 7 7800X3D + RTX 5060 (CS2 deathmatch, 3 runs of 30 s, mask off): 1% low 429, 0.1% low 230, the longest wait of a game thread for a core 183 µs, no wait of a main game thread over 0.5 ms.
+Measured on the developer's Ryzen 7 7800X3D + RTX 5060 (CS2 deathmatch, 3 runs of 30 s, mask off): 1% low 429, 0.1% low 230, the longest wait of a game thread for a core 183 µs, no wait of a main game thread over 0.5 ms.
 
 Previous version **1.16.0** (shipped with playbook 2.3.0). New since 1.15.0:
 
 - **Updates and testing**: one page for the update check, rolling back to the previous version, the tester key and the update channel (they were in About and Settings).
-- **Dynamic Top-5 is the only thread mode**: the role plan is removed, in the owner's measurements it only made things worse.
+- **Dynamic Top-5 is the only thread mode**: the role plan is removed, in the developer's measurements it only made things worse.
 - **Devices**: instead of the big table, one line and an "Apply the layout" button; its confirmation lists which device gets which core. When the layout is already in place, there is nothing to apply.
 - **Burst guard** (Settings, on, soft mode): while a game is handled, a background program of your session that keeps using 0.3 of a processor or more for 6 s gets the smallest scheduling weight of a Job Object of its own: it is never stopped, it only gives way when the processors are busy (soft mode off: a hard cap of half a processor). Child processes break away, so a game started from it is never limited. Lifted when you switch to that program, when the game ends, Auto stops or Toolbox exits, and after a crash at the next start. Services, launchers, the shell, audio / voice / streaming / VR, network boosters, security software and anti-cheats are never touched. Only when free memory is low (under 10% of RAM or 1.5 GB) the game keeps its current memory as a hard minimum (at most 25% of RAM). On a clean PC it does nothing; after a game the log says what was limited.
 - **6 cores or fewer** (one cache domain, no E-cores): Auto gives the game every core and the device layout gives no device a core of its own. On a tester's i5-10400F the old mask cost 6% of the 1% low in CS2. 8 cores and more work as in 1.15.0. Setting `AutoMask` auto | on | off (`--auto-mask`), `--auto on|off|status` for scripted measurements.
 - Check page (one measured run), crash memory of the GPU overclock, own load per thread, shorter texts in Settings.
 
-Test builds are encrypted and live in a private repository that only the owner and invited testers can see. 376 automated tests run against a simulated Windows (`cargo test`, see [Tests](#tests)), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
+Test builds are encrypted and live in a private repository that only the developer and invited testers can see. 376 automated tests run against a simulated Windows (`cargo test`, see [Tests](#tests)), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
 
 ## Build from source
 
@@ -368,7 +368,7 @@ carries it, so until then a leaked key could sign a fake feed. To shorten that w
 
 ## Team
 
-- **6kane1** — author and owner of Domain OS.
+- **6kane1** — author and developer of Domain OS.
 - **Zero Unflesh (zero_wake)** — co-owner of Domain OS and owner of AerialOS. Made a very large contribution to this project.
 
 ## License
