@@ -1,3 +1,6 @@
 core/target*/
 out/
 obj/
+
+# Rust build cache of the threadmap crate (was committed by mistake before 1.17.1)
+threadmap/target/
