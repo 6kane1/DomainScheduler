@@ -1,0 +1,46 @@
+[package]
+name = "dos_core"
+version = "1.17.0"
+edition = "2021"
+description = "Domain OS Toolbox logic (Rust core of the native Toolbox)"
+license-file = "../LICENSE"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+# Insertion-ordered maps: C# Dictionary/HashSet enumerate in insertion order, and the port keeps every order.
+indexmap = "2"
+# The Thread map logic (../threadmap, C ABI tm_*): linked into this staticlib, so the app gets dos_* and tm_* from one library.
+threadmap = { path = "../threadmap" }
+
+[features]
+# Test helpers (native::fake::FakeNative, topo::synth, base::hooks::static_hooks) for integration tests outside the crate.
+testsupport = []
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography",
+  "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_ProcessStatus",
+  "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Etw", "Win32_System_Diagnostics_Debug",
+  "Win32_System_Registry", "Win32_System_Power", "Win32_System_Memory", "Win32_System_LibraryLoader",
+  "Win32_System_Kernel", "Win32_System_IO", "Win32_System_Com", "Win32_System_Ole",
+  "Win32_System_Performance", "Win32_System_Services", "Win32_System_RemoteDesktop", "Win32_System_WindowsProgramming",
+  "Win32_Storage_FileSystem", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties",
+  "Win32_Networking_WinHttp", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi",
+  "Win32_System_Variant", "Win32_System_Wmi", "Win32_System_Environment", "Win32_System_SystemServices",
+  "Win32_Globalization", "Win32_System_Time",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,22 @@
+[package]
+name = "threadmap"
+version = "0.1.0"
+edition = "2021"
+description = "Domain OS Toolbox: Thread map logic (process/thread wake, preempt, lock and ipc graph from kernel trace events)"
+license-file = "../LICENSE"
+
+[lib]
+# rlib: the core can depend on this crate and re-export the tm_ functions (one Rust staticlib per exe, never two).
+# staticlib: lets the app link it alone while it is not wired into the core yet.
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

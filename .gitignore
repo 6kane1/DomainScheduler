@@ -1,6 +1,3 @@
-bin/
+core/target*/
+out/
 obj/
-archive/
-*.user
-*.zip
-.vs/

@@ -6,6 +6,11 @@ A user-mode Windows utility that tunes how the scheduler places a game's threads
 room background programs take. Its goal is **steadier frame times** — better 1% and 0.1% lows
 and a more even frame pacing — not a higher average FPS.
 
+Since 1.17.0 it is a native program: the logic is a Rust library, the window is C++20 with Dear ImGui and
+DirectX 11, and both are linked into one static `DomainScheduler.exe` of about 8 MB. It keeps the behaviour, the
+storage, the command-line switches and the scheduled task of the C# Toolbox 1.16.x (see
+[Compatibility with the C# Toolbox](#compatibility-with-the-c-toolbox)).
+
 > **Read this first**
 > - **Average FPS does not go up.** The program does not make the CPU or GPU faster. It works on
 >   the worst frames: 1% low, 0.1% low, p99 frame time.
@@ -37,8 +42,11 @@ and a more even frame pacing — not a higher average FPS.
 - **Check page** (1.16.0 Test 1.1): one 30-second run while you play — FPS, 1% / 0.1% low, longest frame, hitches and
   how long the game's threads wait for a processor; the report is saved on the desktop. Nothing in the game is opened
   (kernel trace and DXGI frames only).
-- **Cache cleaner**, autostart through Task Scheduler, a one-click report, a colour-coded log. The About page splits
-  the program's own load by thread (window, worker, DPC/ISR trace, frame trace) since 1.16.0 Test 1.
+- **Thread map** (1.17.0, Scheduler section): the game's processes and threads as a live graph (who wakes whom, who
+  waits on whose lock, who takes whose core, who calls whom) over a 30 s history. Its kernel trace runs only while the
+  page is on screen.
+- **Cache cleaner**, autostart through Task Scheduler, a one-click report, a colour-coded log. The program measures its
+  own load by thread; when threads outside the known list use a quarter of a core or more, the log names them.
 
 No kernel driver, no DLL injection, no hooks, no memory patching — only documented Windows APIs
 (affinity, CPU Sets, ideal processor, priority classes, thread priority and boost, I/O and memory
@@ -48,7 +56,7 @@ priority, EcoQoS). Nothing leaves the machine.
 
 - Windows 10 (1903 or newer) or Windows 11, x64
 - Administrator rights (the program asks for them at start)
-- No runtime to install: the release build is self-contained
+- No runtime to install: the release build is one static exe (about 8 MB)
 
 ## Quick start
 
@@ -107,11 +115,9 @@ Settings that apply to every CPU:
 - The program runs with administrator rights (without a UAC prompt only if that playbook option was ticked; off by
   default since playbook 2.1.9). Everything it
   restores or acts on by itself is kept where only administrators can write (see below), and every restored value is
-  checked against what the program itself writes. Two things remain outside its control: the .NET host first unpacks
-  the program's native libraries into `%TEMP%` on the very first start of a run (the program then starts itself again
-  with them unpacked into its admin-only folder before any of them is loaded; if that is impossible it carries on with
-  the `%TEMP%` copy and logs it), and environment variables of your account that make .NET load extra code (a
-  profiler) still apply to that first start. With UAC prompts switched off, any program of an administrator account
+  checked against what the program itself writes. Since 1.17.0 the program is one static exe with no runtime host:
+  nothing is unpacked into `%TEMP%` at start (the C# Toolbox 1.16.x and older had its .NET host unpack native
+  libraries there on the first start of a run). With UAC prompts switched off, any program of an administrator account
   can get administrator rights anyway; these protections matter most when UAC prompts are on.
 
 ## GPU overclock
@@ -145,7 +151,20 @@ offers a small, careful overclock with named profiles, one of which can be appli
 
 ## Project status
 
-Released version: **1.16.1** (shipped with playbook 2.3.1, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)). New since 1.16.0:
+Released version: **1.17.0** (shipped with playbook 2.3.2, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)). New since 1.16.1:
+
+- **Native program**: the same Toolbox rebuilt as a Rust core and a C++20 window (Dear ImGui, DirectX 11, Win32), one
+  static exe of about 8 MB instead of the self-contained .NET 8 / WPF exe of about 71 MB. Same exe name, install folder,
+  scheduled task, settings, state folder, command-line switches and update keys. The window redraws only on input, on a
+  timer a page asked for or when the program's state changed.
+- **Look**: a static dark background with a soft pink and violet glow, translucent panels, soft buttons.
+- **Overview page**: the row "Boost / Reapply / Resync / Revert" is gone. Auto boosts and re-applies by itself, and
+  Revert did the same as "Undo everything" in the status panel. "Resync" is now **Reload hardware and presets** in the
+  advanced part of Settings.
+- **Thread map** page (Scheduler section), see [What it does](#what-it-does).
+- From the 1.16.2 test builds: the burst guard never limits the graphics driver's own processes (NVIDIA and AMD containers, panels, overlays) or DomainSchedTest, so measurements stay exact. **CS2 under FACEIT** is tuned too (switch in Settings, on): FACEIT confirmed in writing on 2026-11-25 that its anti-cheat allows it; only CS2 and only FACEIT, every other anti-cheat stays untouched. The core mask is used only on processors with more than 8 cores of two kinds (Intel with E-cores, Ryzen with two CCDs). The Black box is **off by default** now (switch in Settings). The System changes page keeps only background recording, pointer acceleration and the two Windows Update changes (the playbook still sets the privacy, advertising and interface ones).
+
+Version **1.16.1** (shipped with playbook 2.3.1). New since 1.16.0:
 
 - **Wait probe** (Settings, on): while Auto handles a game, the kernel trace adds context switches, ready threads and hard page faults for 250 ms every 2 s. Dynamic Top-5 ranks the game's threads by load **and** by their p99 wait for a core (a thread that waits 1 ms counts like a 30% share), and a slot leaves its processor for one of three separate reasons: other programs keep it busy (without the interrupt time), drivers take more than 5% of it in DPC/ISR, or its own thread keeps waiting (p99 above 0.5 ms).
 - **Core mask**: processors with one cache domain and no E-cores give the game every core at any core count (6 or fewer before). On the owner's 7800X3D the mask made the main game threads wait for a core 13 times per 30 s in CS2 deathmatch, the longest wait 940 µs (202 µs without), with 1% / 0.1% low equal. A **Core mask** button on the game threads page switches it off or on in one click (Auto picks it up within ~10 s), with a short guide on testing it.
@@ -165,26 +184,122 @@ Previous version **1.16.0** (shipped with playbook 2.3.0). New since 1.15.0:
 - **6 cores or fewer** (one cache domain, no E-cores): Auto gives the game every core and the device layout gives no device a core of its own. On a tester's i5-10400F the old mask cost 6% of the 1% low in CS2. 8 cores and more work as in 1.15.0. Setting `AutoMask` auto | on | off (`--auto-mask`), `--auto on|off|status` for scripted measurements.
 - Check page (one measured run), crash memory of the GPU overclock, own load per thread, shorter texts in Settings.
 
-Test builds are encrypted and live in a private repository that only the owner and invited testers can see. 273 automated tests run against a simulated Windows (`dotnet test tests/DomainScheduler.Tests`), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
+Test builds are encrypted and live in a private repository that only the owner and invited testers can see. 376 automated tests run against a simulated Windows (`cargo test`, see [Tests](#tests)), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
 
 ## Build from source
 
+The source of the native Toolbox (1.17.0 and newer). It is published in `toolbox/` of
+[6kane1/DomainOS](https://github.com/6kane1/DomainOS) and at the root of
+[6kane1/DomainScheduler](https://github.com/6kane1/DomainScheduler); the C# source of 1.16.x and older stays on branch
+`csharp` of 6kane1/DomainScheduler.
+
+### Layout
+
 ```
-dotnet publish src/DomainScheduler/DomainScheduler.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
-dotnet test tests/DomainScheduler.Tests
+core/                Rust crate dos_core: all the logic; a static library for the exe (libdos_core.a), an rlib for the tests
+  src/base           shared types, settings, translations, log, feature flags, the state folder, the version
+  src/native         Windows calls behind a trait, and the fake Windows the tests run against
+  src/topo           processor topology, core masks, core split, interrupt layout, core reservation
+  src/engine         priorities, background layer, guard (denylist, anti-cheats), session, built-in tables
+  src/auto           Auto, Dynamic Top-5, burst guard, tuner, HUD, the Check page's statistics
+  src/etw            kernel traces: DPC/ISR, frames, wait probe, Black box, Check trace, Thread map trace
+  src/system         store, updater, autostart, boot guard, legacy import, system changes, devices, maintenance
+  src/gpu            GPU overclock (NVIDIA, AMD) and its profiles
+  src/ffi            the C ABI for the app (header app/src/dos_core.h): the long-lived objects, start-up, command line,
+                     single instance, update hand-over
+  res/               embedded into the exe: lang/ (en.json, ru.json, tables.json, threads.ini), ru.native.json
+  tests/             integration tests (parity_gaps.rs), signature test samples (data/sigsample)
+threadmap/           Rust crate threadmap: the Thread map logic (graph, history, layout), linked into dos_core (threadmap.h)
+app/                 the window: C++20, Dear ImGui + DirectX 11 + Win32; no logic, everything that decides or changes
+                     something is a call into the core
+  src/               shell (main, window chrome, sidebar, theme, widgets, tray, error popup, charts, bridge to the core)
+  src/pages/         one file per page
+  src/app.rc         icon, manifest, embedded fonts
+  third_party/imgui  Dear ImGui 1.92.9b (vendored, with its LICENSE.txt)
+  res/               app.ico, app.manifest (administrator, per-monitor DPI v2), Fonts/ (Inter, JetBrains Mono)
+tools/sync-lang.sh   refreshes core/res/lang from the C# source
+build.sh             the whole build
+LICENSE
 ```
 
-.NET 8 SDK. The solution has three projects: `DomainScheduler.Lib` (logic and Windows calls),
-`DomainScheduler` (WPF window, code-behind only) and `DomainScheduler.Tests` (xUnit).
+### Toolchain and build
 
-Third-party packages: Microsoft.Diagnostics.Tracing.TraceEvent, System.Management.
+The Windows exe is cross-built on Linux:
+
+- Rust **1.100.0** with the target `x86_64-pc-windows-gnullvm`;
+- **llvm-mingw 20260922** (`llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64`): `x86_64-w64-mingw32-clang++`, `windres`,
+  `llvm-strip`.
+
+`./build.sh` runs, in this order: `cargo test` (core with `--features testsupport`, threadmap), `cargo build --locked
+--release --target x86_64-pc-windows-gnullvm` (the static library `libdos_core.a`), then `x86_64-w64-mingw32-clang++`
+compiles Dear ImGui and `app/src`, `windres` compiles `app/src/app.rc`, everything is linked into one static exe and
+`llvm-strip` strips it. The result is `out/DomainScheduler.exe` (about 8 MB).
+
+| Option | What it does |
+|---|---|
+| `./build.sh --no-test` | skips `cargo test` |
+| `OUT=path/DomainScheduler.exe` | where the exe is written (default `out/DomainScheduler.exe`) |
+| `OBJ=folder` | the folder for the C++ object files (default `obj`, deleted after the build) |
+| `CARGO_TARGET_DIR=folder` | Cargo's own build folder (with `OBJ`: several builds side by side) |
+| `MINGW=path` | the `bin` folder of llvm-mingw (default `~/sdk/llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64/bin`) |
+| `NO_CORE=1` | the app alone on `app/src/core_stub.cpp`, no Rust build (for work on the window only) |
+
+`RUSTUP_HOME` and `CARGO_HOME` default to `~/sdk/rust/rustup` and `~/sdk/rust/cargo`.
+
+**The version has one source:** `version` in `core/Cargo.toml`. The program reads it at build time
+(`env!("CARGO_PKG_VERSION")`), and the build writes it into the exe's file properties (VERSIONINFO).
+
+**Shared resource files:** `core/res/lang/{en.json,ru.json,tables.json,threads.ini}` are the same translations, built-in
+tables and thread names as in the C# Toolbox, vendored here; `tools/sync-lang.sh` refreshes them from the C# source.
+Texts that only the native Toolbox has are translated in `core/res/ru.native.json`, which is merged over `ru.json` at
+start.
+
+Third-party code: the Rust crates serde, serde_json, sha2, p256, aes-gcm, base64, indexmap and windows-sys (exact
+versions in `Cargo.lock`), Dear ImGui 1.92.9b (MIT), the Inter and JetBrains Mono fonts (SIL Open Font License 1.1,
+embedded into the exe).
+
+### Tests
+
+```
+cd core && cargo test --locked --features testsupport   # 344 unit tests + 4 integration tests (tests/parity_gaps.rs)
+cd threadmap && cargo test --locked                     # 28 tests
+```
+
+376 tests on Linux. A Windows build of the tests runs 350 core tests (6 of them only exist on Windows). The logic runs
+against a fake Windows, so nothing on the PC is changed. On GitHub, `tests.yml` runs these tests on Ubuntu (area G of
+`tests/run-all.py`) and on windows-latest.
+
+### Proof that an exe is built from this source
+
+`.github/workflows/toolbox-build.yml` of 6kane1/DomainOS builds Toolbox on GitHub's machines (ubuntu-latest): the
+pinned toolchain (`.github/actions/native-toolchain`, llvm-mingw checked by SHA-256), the tests first, the crates exactly
+as in `Cargo.lock` (`--locked`), build paths taken out of the exe (`--remap-path-prefix`). Every exe gets a signed
+build-provenance attestation and an attested SPDX SBOM (`tools/make-sbom-native.py`: the crates, Dear ImGui, the fonts,
+the build tools). Check any copy with the GitHub CLI:
+
+```
+gh attestation verify DomainOS-Toolbox-1.17.0.exe -R 6kane1/DomainOS
+```
+
+## Compatibility with the C# Toolbox
+
+The native Toolbox replaces the C# one (WPF, .NET 8, up to 1.16.x) and keeps everything other parts of Domain OS rely
+on: the exe name `DomainScheduler.exe`, the install folder `C:\Program Files\Domain OS`, the scheduled task
+`DomainScheduler`, the settings in `HKCU\Software\DomainScheduler` and `HKLM\SOFTWARE\Domain OS\Toolbox`, the state
+folder `%ProgramData%\Domain OS Toolbox` with the same files, the same command-line switches (`--auto on|off|status`,
+`--auto-mask`, `--after-update` and the others) and the same update signature keys. The playbook and Undo work with both.
+
+**Update feeds:** the native Toolbox reads `update/stable-native.json` and the sealed test feed `update/test-native.bin`.
+The C# Toolbox 1.16.x keeps reading `update/stable.json` and `update/test.bin`; `stable.json` keeps the 1.16.1 entry.
+A C# Toolbox is therefore **not** updated to the native one by itself: it comes with playbook 2.3.2, installed with AME
+Wizard over Domain OS. The C# Toolbox shows a card when playbook 2.3.2 is out and can download it.
 
 ## Where things are stored
 
 - **State folder** `%ProgramData%\Domain OS Toolbox` — presets, profiles, GPU profiles, the backups of device,
-  registry, power and core-reservation changes, the crash-safe session file, the device boot guard, the log, update
-  downloads (`Updates`) and the program's unpacked native libraries (`native`). Only SYSTEM and Administrators can
-  change anything in it; other accounts can read it. Its owner and permissions are checked at every start: a folder
+  registry, power and core-reservation changes, the crash-safe session file, the device boot guard, the log and update
+  downloads (`Updates`); `native` holds the native libraries the C# Toolbox 1.16.x and older unpacked (the native
+  Toolbox has none to unpack). Only SYSTEM and Administrators can change anything in it; other accounts can read it. Its owner and permissions are checked at every start: a folder
   someone else could have written to is renamed `…untrusted-<time>`, never read, and a fresh one is made.
 - **Settings that make the program act by itself** (feature flags, the GPU overclock at start, one-shot clean-ups):
   `HKLM\SOFTWARE\Domain OS\Toolbox` (administrators only).
@@ -206,10 +321,11 @@ no value is ever put into a command line as text.
 
 ## Update keys and key rotation
 
-Update feeds (`update/stable.json`, the sealed test feed `update/test.bin`) are signed with ECDSA P-256; the `.sig`
-next to each is the base64 DER signature over SHA-256, made by `DomainOS/tools/sign-feed.sh`. Toolbox trusts a short
-list of public keys (`Updater.TrustedKeys`): a feed is accepted when its signature checks with **any** of them. The
-`.sig` format has not changed and carries no key id, so feeds signed with the main key keep working for every Toolbox
+Update feeds (`update/stable-native.json`, the sealed test feed `update/test-native.bin`; the C# Toolbox 1.16.x reads
+`update/stable.json` and `update/test.bin`) are signed with ECDSA P-256; the `.sig` next to each is the base64 DER
+signature over SHA-256, made by `DomainOS/tools/sign-feed.sh`. Toolbox trusts a short list of public keys
+(`Updater::trusted_keys()` in `core/src/system/updater.rs`): a feed is accepted when its signature checks with **any**
+of them. The `.sig` format has not changed and carries no key id, so feeds signed with the main key keep working for every Toolbox
 version in the field; the new code simply tries each trusted key.
 
 | Key | Id (SHA-256 of the public key, first 16 hex) | Where the private half lives |
@@ -217,25 +333,27 @@ version in the field; the new code simply tries each trusted key.
 | main | `824da223f01c0905` | the author's PC (plus an offline backup copy) |
 | backup | `a807a74083942dde` | offline only (USB stick / paper) |
 
-`Updater.RevokedKeyIds` lists keys that must never be trusted again. It is checked against the fingerprint computed
+`Updater::REVOKED_KEY_IDS` lists keys that must never be trusted again. It is checked against the fingerprint computed
 from the key itself, so a revoked key is refused even if it is still listed as trusted.
 
 **If the main key leaks or is lost:**
 
 1. Stop signing with it. Make a new key pair: `openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8
    -nocrypt -out NEW.pem` (`chmod 600 NEW.pem`); its public key: `openssl pkey -in NEW.pem -pubout -outform DER | base64 -w0`.
-2. In `Updater.cs` the old backup becomes `PublicKey` (main), the new key becomes `BackupPublicKey`, the ids in
-   `TrustedKeys` are updated (the test `BuiltInKeyListIsConsistent` checks them), and a leaked key's id goes into
-   `RevokedKeyIds`. Build and test that Toolbox.
-3. Sign the feed that ships it with the backup key:
-   `DOMAINOS_SIGNING_KEY_BACKUP=/path/on/usb.pem sign-feed.sh --backup update/stable.json` (also `test.bin`).
-   Installed versions already trust the backup key, so they accept the feed and update to the version that no longer
-   trusts the compromised key.
+2. In `core/src/system/updater.rs` the old backup becomes `PUBLIC_KEY` (main), the new key becomes
+   `BACKUP_PUBLIC_KEY`, the ids in `trusted_keys()` are updated (the test `built_in_key_list_is_consistent` checks
+   them), and a leaked key's id goes into `REVOKED_KEY_IDS`. Build and test that Toolbox. The C# Toolbox 1.16.x still
+   reads `update/stable.json` and trusts the same two keys: make the same change in its `Updater.cs` (branch `csharp`
+   of 6kane1/DomainScheduler) and ship that build in `stable.json`.
+3. Sign the feeds that ship them with the backup key:
+   `DOMAINOS_SIGNING_KEY_BACKUP=/path/on/usb.pem sign-feed.sh --backup update/stable-native.json` (also
+   `test-native.bin`, `stable.json`, `test.bin`). Installed versions already trust the backup key, so they accept the
+   feed and update to the version that no longer trusts the compromised key.
 4. The old backup is now the main signing key; keep `NEW.pem` offline as the next backup; delete every copy of the
    compromised key.
 
-If only the backup key is lost or leaked, ship a Toolbox with a new `BackupPublicKey` (and the old backup id in
-`RevokedKeyIds` if it leaked), signed with the main key as usual.
+If only the backup key is lost or leaked, ship a Toolbox with a new `BACKUP_PUBLIC_KEY` (and the old backup id in
+`REVOKED_KEY_IDS` if it leaked), signed with the main key as usual.
 
 **Telling users (the same day a key leak is known):** a revocation reaches a PC only with the Toolbox update that
 carries it, so until then a leaked key could sign a fake feed. To shorten that window:
