@@ -1178,3 +1178,207 @@ fn is_system_matches_the_soft_close_copy() {
         assert_eq!(AutoController::is_system(exe), crate::engine::soft_close::auto_is_system(exe), "{}", exe);
     }
 }
+
+// ---- 1.17.1: ideal cores for all game threads (Top-5's all-threads layer) on a fake Windows -------------------------
+
+/// top5_fx with real ideal processors (Windows' own: every thread on 0) so the layer can put them back.
+fn all_fx() -> Fx {
+    let x = top5_fx();
+    for t in x.f.lock().threads.values_mut().filter(|t| t.pid == 500) {
+        t.ideal = 0;
+    }
+    x
+}
+
+fn slot_lps(x: &Fx) -> Vec<u32> {
+    x.c.dynamic().view().iter().map(|s| s.lp).collect()
+}
+
+fn others(x: &Fx) -> Vec<u32> {
+    let slots: Vec<u32> = x.c.dynamic().view().iter().map(|s| s.tid).collect();
+    [100u32, 101, 102, 103, 104, 105, 107].into_iter().filter(|t| !slots.contains(t)).collect()
+}
+
+#[test]
+fn all_threads_get_an_ideal_core_off_core_0_and_the_slots_and_get_it_back() {
+    let x = all_fx();
+    x.c.set_top5(true);
+    x.game_to_active();
+    x.seconds(6);
+    let lps = slot_lps(&x);
+    assert_eq!(5, lps.len());
+    let rest = others(&x);
+    assert_eq!(2, rest.len());
+    {
+        let s = x.f.lock();
+        for t in &rest {
+            let th = &s.threads[t];
+            assert!(th.ideal >= 2 && th.ideal < 16, "thread {} on {}", t, th.ideal);
+            assert!(!lps.contains(&th.ideal), "thread {} on the slot processor {}", t, th.ideal);
+            assert_eq!(0, th.prio); // only the ideal processor
+            assert_eq!(0, th.sets_writes);
+        }
+        assert_eq!(0, s.threads[&106].ideal); // the anti-cheat thread is never touched
+        assert_eq!(0, s.threads[&106].ideal_sets);
+    }
+    let v = x.c.dynamic().all_view();
+    assert!(v.on && v.running);
+    assert_eq!(2, v.placed + v.kept);
+    assert!(logged(Sev::Info, "All game threads: 2 threads on cpus"), "{}", tail());
+    // steady: nothing is written
+    let sets = x.e.set_calls();
+    x.seconds(20);
+    assert_eq!(sets, x.e.set_calls());
+    // off: everything as before the program
+    x.c.click();
+    let s = x.f.lock();
+    for t in s.threads.values().filter(|t| t.pid == 500) {
+        assert_eq!(0, t.ideal);
+        assert_eq!(0, t.prio);
+    }
+    assert!(!x.c.dynamic().all_view().running);
+}
+
+#[test]
+fn all_threads_hand_threads_to_top5_and_take_them_back() {
+    let x = all_fx();
+    x.c.set_top5(true);
+    x.game_to_active();
+    x.seconds(6);
+    assert!(others(&x).contains(&107));
+    let placed_107 = x.f.lock().threads[&107].ideal;
+    assert_ne!(0, placed_107);
+    // 107 becomes the hottest thread: Top-5 takes it, another thread leaves Top-5 and this layer takes that one
+    lock(&x.rates).push((107, 20_000_000_000));
+    x.seconds(20);
+    let view = x.c.dynamic().view();
+    assert_eq!(107, view[0].tid);
+    let lps = slot_lps(&x);
+    {
+        let s = x.f.lock();
+        assert_eq!(view[0].lp, s.threads[&107].ideal);
+        assert_eq!(1, s.threads[&107].prio);
+        for t in others(&x) {
+            assert!(s.threads[&t].ideal >= 2 && s.threads[&t].ideal < 16 && !lps.contains(&s.threads[&t].ideal));
+            assert_eq!(0, s.threads[&t].prio);
+        }
+    }
+    assert!(x.c.dynamic().all_view().events.iter().any(|e| e.reason == super::all_threads::AllReason::ToTop5 && e.tid == 107));
+    // off: 107 gets the original of before this layer back (0), not the layer's value
+    x.c.click();
+    let s = x.f.lock();
+    for t in s.threads.values().filter(|t| t.pid == 500) {
+        assert_eq!(0, t.ideal);
+        assert_eq!(0, t.prio);
+    }
+}
+
+#[test]
+fn all_threads_off_writes_nothing_and_switching_off_puts_the_values_back() {
+    let x = all_fx();
+    x.c.dynamic().set_all_threads(false);
+    x.c.set_top5(true);
+    x.game_to_active();
+    x.seconds(6);
+    let rest = others(&x);
+    {
+        let s = x.f.lock();
+        for t in &rest {
+            assert_eq!(0, s.threads[t].ideal_sets);
+        }
+    }
+    assert!(!x.c.dynamic().all_view().running);
+    // on while the game runs: placed on the next ticks
+    x.c.dynamic().set_all_threads(true);
+    x.seconds(2);
+    assert!(rest.iter().all(|t| x.f.lock().threads[t].ideal != 0));
+    // the game sets one of them itself: that value stays when the layer lets go
+    x.f.lock().threads.get_mut(&rest[0]).unwrap().ideal = 9;
+    x.seconds(2);
+    // off while the game runs: the layer's value goes back, someone else's stays
+    x.c.dynamic().set_all_threads(false);
+    x.seconds(2);
+    {
+        let s = x.f.lock();
+        assert_eq!(9, s.threads[&rest[0]].ideal);
+        assert_eq!(0, s.threads[&rest[1]].ideal);
+    }
+    assert!(logged(Sev::Info, "All game threads: off, 1 ideal processors put back"), "{}", tail());
+    assert_eq!(AutoState::Active, x.c.state());
+}
+
+#[test]
+fn all_threads_write_nothing_while_the_guard_refuses_the_game() {
+    let x = all_fx();
+    let top = Top5::new(x.e.clone());
+    assert!(top.start(500, "cs2.exe", Some(&synth::x7800x3d()), 0));
+    top.set_meta(Some(&x.e.snapshot(500)));
+    // the guard closes (an anti-cheat started): the layer plans but writes nothing
+    x.e.set_gate_hook(Some(Arc::new(|_pid, _exe: &str| Some("anti-cheat".to_string()))));
+    let tids: Vec<u32> = (100..=107).collect();
+    for _ in 0..5 {
+        x.advance(1000);
+        let now = *lock(&x.now);
+        top.tick(now, Some(&tids));
+    }
+    let v = top.all_view();
+    assert!(v.counters.blocked);
+    assert_eq!(0, v.placed);
+    let slots: Vec<u32> = top.view().iter().map(|s| s.tid).collect();
+    let s = x.f.lock();
+    let mut checked = 0;
+    for t in [100u32, 101, 102, 103, 104, 105, 107].iter().filter(|t| !slots.contains(t)) {
+        assert_eq!(0, s.threads[t].ideal_sets);
+        checked += 1;
+    }
+    assert!(checked > 0);
+}
+
+#[test]
+fn all_threads_stay_inside_the_game_mask() {
+    let x = all_fx();
+    let top = Top5::new(x.e.clone());
+    let mask = 0xFF00u64; // processors 8-15 (the slots take 8, 10, 12, 14 and 9)
+    assert!(top.start(500, "cs2.exe", Some(&synth::x7800x3d()), mask));
+    top.set_meta(Some(&x.e.snapshot(500)));
+    let tids: Vec<u32> = (100..=107).collect();
+    for _ in 0..6 {
+        x.advance(1000);
+        let now = *lock(&x.now);
+        top.tick(now, Some(&tids));
+    }
+    let slots: Vec<u32> = top.view().iter().map(|s| s.tid).collect();
+    let s = x.f.lock();
+    let mut checked = 0;
+    for t in [100u32, 101, 102, 103, 104, 105, 107].iter().filter(|t| !slots.contains(t)) {
+        let i = s.threads[t].ideal;
+        assert!((mask >> i) & 1 == 1, "thread {} on {}", t, i);
+        checked += 1;
+    }
+    assert!(checked > 0);
+}
+
+#[test]
+fn a_revert_puts_back_only_the_ideal_processors_that_are_still_the_layers() {
+    let x = all_fx();
+    let n: Arc<dyn crate::native::INative> = x.f.clone();
+    let (h4, h5) = (n.open_thread_of(500, 104), n.open_thread_of(500, 105));
+    let mut ok = Vec::new();
+    assert_eq!(2, x.e.place_ideals(500, &[(104, h4, 1040, 7), (105, h5, 1050, 9)], &mut ok));
+    assert_eq!(vec![true, true], ok);
+    {
+        let s = x.f.lock();
+        assert_eq!((7, 9), (s.threads[&104].ideal, s.threads[&105].ideal));
+        assert_eq!(0, s.threads[&104].prio);
+    }
+    // the crash-safe session holds both originals before the first write
+    let saved = lock(&x.saved).last().cloned().expect("a saved session");
+    assert!(saved.threads.iter().any(|t| t.tid == 104 && t.ideal_set && t.ideal == 0 && !t.prio_set));
+    assert!(saved.threads.iter().any(|t| t.tid == 105 && t.ideal_set && t.ideal == 0));
+    x.f.lock().threads.get_mut(&105).unwrap().ideal = 3; // the game moved it itself
+    x.e.revert(500);
+    let s = x.f.lock();
+    assert_eq!(0, s.threads[&104].ideal);
+    assert_eq!(3, s.threads[&105].ideal);
+    assert_eq!(0, s.threads[&104].prio);
+}

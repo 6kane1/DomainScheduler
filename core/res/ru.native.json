@@ -72,6 +72,26 @@
   "frame trace flush": "сброс трассы кадров",
   "worker timer": "таймер рабочего потока",
   "Auto command": "команда Авто",
-  "update timer": "таймер обновлений"
+  "update timer": "таймер обновлений",
+  "All game threads: off, {0} ideal processors put back": "Все потоки игры: выключено, возвращено идеальных ядер: {0}",
+  "All game threads: {0} threads on cpus {1} (driver cpus {2} avoided)": "Все потоки игры: {0} потоков на ЦП {1} (ЦП драйверов {2} обходятся)",
+  "Ideal cores for all game threads": "Идеальные ядра всем потокам игры",
+  "With Auto, every other thread of the game (DLL threads too) gets a preferred core away from core 0, the Top-5 cores and the cores drivers keep busy, and is moved only for a clear reason. Only a hint: the threads still migrate. Off puts the values back.": "С Авто каждый остальной поток игры (и потоки DLL) получает предпочтительное ядро не на ядре 0, не на ядрах Топ-5 и не на ядрах, занятых драйверами, и переносится только по явной причине. Это лишь подсказка: потоки по-прежнему мигрируют. Выключение возвращает значения.",
+  "Every other thread of the game (DLL threads too) gets a preferred core away from core 0, the Top-5 cores and the cores drivers keep busy. Only a hint: the threads still migrate.": "Каждый остальной поток игры (и потоки DLL) получает предпочтительное ядро не на ядре 0, не на ядрах Топ-5 и не на ядрах, занятых драйверами. Это лишь подсказка: потоки по-прежнему мигрируют.",
+  "Off: the other threads keep the cores Windows gave them.": "Выключено: остальные потоки остаются на ядрах, которые дала Windows.",
+  "Other threads: the guard does not allow changes to this game.": "Остальные потоки: защита не разрешает менять эту игру.",
+  "Other threads: measuring…": "Остальные потоки: идёт замер…",
+  "Other threads: {0} placed on cpus {1}, {2} kept as they were": "Остальные потоки: {0} размещено на ЦП {1}, {2} оставлено как есть",
+  " (driver cpus {0} avoided)": " (ЦП драйверов {0} обходятся)",
+  "first placement": "первое размещение",
+  "drivers keep that core busy": "ядро занято драйверами",
+  "the core went to Top-5": "ядро отдано Топ-5",
+  "that core is not allowed any more": "это ядро больше не разрешено",
+  "its core stayed busier": "его ядро дольше было загружено сильнее",
+  "entered Top-5": "вошёл в Топ-5",
+  "changed by another program, left alone": "изменено другой программой, оставлено как есть",
+  "Windows refused, tried again in 30 s": "Windows отказала, повтор через 30 с",
+  "thread {0}: CPU {1} to {2}, {3}": "поток {0}: ЦП {1} на {2}, {3}",
+  "Other threads": "Остальные потоки"
  }
 }

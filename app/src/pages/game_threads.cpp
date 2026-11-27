@@ -12,6 +12,7 @@
 #include "pages/common_a.h"
 #include "shell.h"
 #include "ui.h"
+#include "widgets.h"
 
 namespace {
 
@@ -52,6 +53,7 @@ public:
 			HeadRow();
 			Rows();
 			ui::Space(16);
+			AllThreads();
 			// Card(UniformGrid 3): How it works, What is protected, Right now.
 			ui::BeginCard();
 			{
@@ -232,6 +234,23 @@ private:
 		float h = ui::S(12) + ch + ui::S(12);
 		dl->AddRectFilled(ImVec2(x0, y0 + h), ImVec2(right, y0 + h + bw), ui::C("Line"));
 		ui::Place(ImVec2(right - x0, h + bw));
+	}
+
+	/// 1.17.1: ideal cores for all game threads (Top-5's other threads): the switch, one line, the last moves.
+	void AllThreads()
+	{
+		ui::BeginCard();
+		ui::Head(L::T("Other threads"));
+		bool on = g_["all_on"].Bool();
+		if (ui::CheckRow("all_threads_ideal", g_["all_label"].Str(), g_["all_hint"].Str(), on))
+		{
+			bridge::SettingToggle("AllThreadsIdeal", on);
+			Tick();
+		}
+		const std::string& line = g_["all_line"].Str();
+		if (!line.empty()) ui::Text(line, ui::FsNote, "Text", false, true, ui::Thick(0, 6, 0, 0));
+		for (const auto& l : g_["all_log"].Arr()) ui::Text(l.Str(), ui::FsNote, "Dim");
+		ui::EndCard();
 	}
 
 	// Column(head, body): head Medium Strong (margin 0,0,12,3); body FsNote Dim wrapped, LineHeight 1.5, margin right 14.

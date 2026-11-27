@@ -548,6 +548,50 @@ fn gt_prio_text(p: Option<i32>) -> String {
     }
 }
 
+/// 1.17.1: the "Ideal cores for all game threads" block under Top-5 (switch, one line, the last moves).
+fn gt_all(o: &mut serde_json::Map<String, Value>, v: &crate::auto::top5::AllView, active: bool) {
+    use crate::auto::all_threads::AllReason;
+    o.insert("all_on".into(), json!(v.on));
+    o.insert("all_label".into(), json!(L::t("Ideal cores for all game threads")));
+    o.insert("all_hint".into(), json!(L::t("Every other thread of the game (DLL threads too) gets a preferred core away from core 0, the Top-5 cores and the cores drivers keep busy. Only a hint: the threads still migrate.")));
+    let line = if !v.on {
+        L::t("Off: the other threads keep the cores Windows gave them.").to_string()
+    } else if !active || !v.running {
+        String::new()
+    } else if v.placed + v.kept == 0 {
+        if v.counters.blocked { L::t("Other threads: the guard does not allow changes to this game.").to_string() } else { L::t("Other threads: measuring…").to_string() }
+    } else {
+        let mut l = lf!("Other threads: {0} placed on cpus {1}, {2} kept as they were", v.placed, Masks::ranges(v.cpus), v.kept);
+        if v.driver != 0 {
+            l += &lf!(" (driver cpus {0} avoided)", Masks::ranges(v.driver));
+        }
+        l
+    };
+    o.insert("all_line".into(), json!(line));
+    let ev: Vec<String> = if active && v.on {
+        v.events
+            .iter()
+            .map(|e| {
+                let why = match e.reason {
+                    AllReason::New => L::t("first placement"),
+                    AllReason::Driver => L::t("drivers keep that core busy"),
+                    AllReason::Slot => L::t("the core went to Top-5"),
+                    AllReason::Rule => L::t("that core is not allowed any more"),
+                    AllReason::Worse => L::t("its core stayed busier"),
+                    AllReason::ToTop5 => L::t("entered Top-5"),
+                    AllReason::Other => L::t("changed by another program, left alone"),
+                    AllReason::Failed => L::t("Windows refused, tried again in 30 s"),
+                };
+                let stamp = e.at.to_local().format("HH:mm:ss", &Culture::invariant());
+                format!("{}  {}", stamp, lf!("thread {0}: CPU {1} to {2}, {3}", e.tid, e.from, e.to, why))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    o.insert("all_log".into(), json!(ev));
+}
+
 fn mask_on() -> bool {
     !AutoLogic::keeps_all_cores(TopoBuilder::live().as_deref(), &app::mask_setting())
 }
@@ -562,6 +606,8 @@ fn game_threads() -> Value {
     let on = mask_on();
     let dynv = auto.dynamic();
     let mut key = format!("{}|{:?}|{}|{}|{}|{}|", L::lang(), st, top5, exe, blocked, num(auto.confidence(), "0.00", &Culture::invariant()));
+    let allv = dynv.all_view();
+    key += &format!("{}|{}|{}|{}|{}|{}|{}|", allv.on, allv.running, allv.placed, allv.kept, allv.cpus, allv.driver, allv.counters.moves + allv.counters.released + allv.counters.failed);
     if st == AutoState::Active {
         if top5 {
             let v: Vec<String> = dynv.view().iter().map(|s| format!("{},{},{},{:?},{:.0}", s.index, s.tid, s.lp, s.prio, s.share * 100.0)).collect();
@@ -585,6 +631,7 @@ fn game_threads() -> Value {
         "share_column": top5,
     });
     let o = out.as_object_mut().expect("object");
+    gt_all(o, &allv, st == AutoState::Active && top5);
     if st != AutoState::Active {
         o.insert("sub".into(), json!(L::t("Fully automatic. Nothing on this page needs to be set.")));
         let empty = if st != AutoState::Armed {

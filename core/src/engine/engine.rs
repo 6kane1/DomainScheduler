@@ -1179,10 +1179,23 @@ impl Engine {
 
     /// What the thread had before the first change: priority, boost, selected CPU Sets.
     fn thread_baseline(&self, th: Handle, k: &str, born: i64) {
-        if self.st().thr_before.contains_key(k) {
+        // 1.17.1: a baseline of the all-threads layer holds the original ideal processor only; when Top-5 (or a rule)
+        // takes the thread, the rest is read now (the layer never changed it) and the original ideal is kept.
+        let ideal_only = self.st().thr_before.get(k).map(|tb| (tb.ideal_only, tb.ideal, tb.ideal_set));
+        if let Some((false, _, _)) = ideal_only {
             return;
         }
         let mut tb = ThrBefore { born, ..Default::default() };
+        if let Some((true, ideal, ideal_set)) = ideal_only {
+            tb.prio_set = self.n.get_thread_prio(th, &mut tb.prio);
+            tb.boost_set = self.n.get_thread_boost_disabled(th, &mut tb.boost_disabled);
+            tb.sets_set = self.n.get_thread_cpu_sets(th, &mut tb.sets);
+            tb.ideal = ideal;
+            tb.ideal_set = ideal_set;
+            self.st().thr_before.insert(k.to_string(), tb);
+            self.before_mutate(); // the priority baseline goes into the session before Top-5 writes one
+            return;
+        }
         tb.prio_set = self.n.get_thread_prio(th, &mut tb.prio);
         tb.boost_set = self.n.get_thread_boost_disabled(th, &mut tb.boost_disabled);
         tb.sets_set = self.n.get_thread_cpu_sets(th, &mut tb.sets);
@@ -1318,6 +1331,117 @@ impl Engine {
         }
         self.st().thr_before.shift_remove(&k);
         n
+    }
+
+    // ---- 1.17.1: ideal processors of the other game threads (Dynamic Top-5's all-threads layer) ------------------
+
+    /// Sets only the ideal processor (SetThreadIdealProcessorEx: no affinity, no CPU Sets, no priority) of several
+    /// threads of one process. A thread whose original ideal processor cannot be read (or is outside group 0) is
+    /// never written: it could not be put back. A thread with a baseline of another kind (Top-5 or a rule holds it)
+    /// is skipped. The new baselines go into the crash-safe session once, before the first write. `ok[i]` tells
+    /// whether item i now has its processor; returns the number of writes.
+    pub fn place_ideals(&self, pid: u32, items: &[(u32, Handle, i64, u32)], ok: &mut Vec<bool>) -> i32 {
+        let _g = self.gate.enter();
+        ok.clear();
+        ok.resize(items.len(), false);
+        let mut fresh = false;
+        let mut can = Vec::with_capacity(items.len());
+        for &(tid, th, born, _) in items {
+            let k = key(pid, tid);
+            let mut st = self.st();
+            if st.thr_before.get(&k).map(|o| o.born != born).unwrap_or(false) {
+                st.thr_before.shift_remove(&k);
+                st.ideal.shift_remove(&k);
+            }
+            match st.thr_before.get(&k) {
+                Some(tb) => {
+                    can.push(tb.ideal_only && tb.ideal_set);
+                }
+                None => {
+                    drop(st);
+                    let mut ideal = 0u32;
+                    let read = self.n.get_thread_ideal(th, &mut ideal) && ideal < 64;
+                    if read {
+                        self.st().thr_before.insert(k, ThrBefore { born, ideal, ideal_set: true, ideal_only: true, ..Default::default() });
+                        fresh = true;
+                    }
+                    can.push(read);
+                }
+            }
+        }
+        // The session lists a thread's ideal processor only once the program holds a value for it, so the values
+        // about to be written are entered first (a crash between the save and the write only puts back an original
+        // that is still in place) and taken out again when Windows refuses.
+        let mut had: Vec<Option<Option<u32>>> = Vec::with_capacity(items.len());
+        for (i, &(tid, _, _, lp)) in items.iter().enumerate() {
+            if !can[i] {
+                had.push(None);
+                continue;
+            }
+            let k = key(pid, tid);
+            let mut st = self.st();
+            let old = st.ideal.get(&k).copied();
+            if old == Some(lp) {
+                ok[i] = true;
+                had.push(None);
+                continue;
+            }
+            fresh |= old.is_none();
+            st.ideal.insert(k, lp);
+            had.push(Some(old));
+        }
+        if fresh {
+            self.before_mutate();
+        }
+        let mut n = 0;
+        for (i, &(tid, th, _, lp)) in items.iter().enumerate() {
+            let Some(old) = had[i] else { continue };
+            n += 1;
+            if self.set(self.n.set_thread_ideal(th, lp)) {
+                ok[i] = true;
+            } else {
+                let k = key(pid, tid);
+                let mut st = self.st();
+                match old {
+                    Some(v) => st.ideal.insert(k, v),
+                    None => st.ideal.shift_remove(&k),
+                };
+            }
+        }
+        n
+    }
+
+    /// Gives back the original ideal processor of a thread placed by `place_ideals`, only while the thread still has
+    /// the value the program set (someone else's later choice is left alone). Returns true when a value was written.
+    pub fn release_ideal(&self, pid: u32, tid: u32, th: Handle) -> bool {
+        let _g = self.gate.enter();
+        let k = key(pid, tid);
+        let (tb, ours) = {
+            let mut st = self.st();
+            match st.thr_before.get(&k) {
+                Some(tb) if tb.ideal_only => {}
+                _ => return false,
+            }
+            let tb = st.thr_before.shift_remove(&k).unwrap_or_default();
+            (tb, st.ideal.shift_remove(&k))
+        };
+        let Some(ours) = ours else { return false };
+        let (mut born, mut ku) = (0i64, 0u64);
+        self.n.thread_times(th, &mut born, &mut ku);
+        let mut cur = 0u32;
+        born == tb.born && tb.ideal_set && self.n.get_thread_ideal(th, &mut cur) && cur == ours && self.set(self.n.set_thread_ideal(th, tb.ideal))
+    }
+
+    /// Forgets a thread placed by `place_ideals` without writing anything (its ideal processor was changed by
+    /// someone else: that value stays).
+    pub fn forget_ideal(&self, pid: u32, tid: u32) {
+        let _g = self.gate.enter();
+        let k = key(pid, tid);
+        let mut st = self.st();
+        if st.thr_before.get(&k).map(|tb| tb.ideal_only).unwrap_or(false) {
+            st.thr_before.shift_remove(&k);
+            st.ideal.shift_remove(&k);
+        }
     }
 
     /// Threads limited to one CPU Set right now ("pid:tid" -> processor).
@@ -1935,7 +2059,13 @@ impl Engine {
                         bad += 1
                     }
                 }
-                let has_ideal = self.st().ideal.contains_key(&k);
+                let ours = self.st().ideal.get(&k).copied();
+                let mut has_ideal = ours.is_some();
+                if tb.ideal_only && has_ideal {
+                    // 1.17.1: the all-threads layer's value goes back only while it is still in force.
+                    let mut now_lp = 0u32;
+                    has_ideal = self.n.get_thread_ideal(th, &mut now_lp) && Some(now_lp) == ours;
+                }
                 if tb.ideal_set && has_ideal {
                     if self.set(self.n.set_thread_ideal(th, tb.ideal)) {
                         n += 1

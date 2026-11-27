@@ -274,9 +274,18 @@ mod tests {
             }
         }
         keys.extend(["wakes", "takes the core", "waits for a lock", "calls"].map(String::from));
-        for f in ["etw/thread_map.rs", "ffi/thread_map.rs"] {
+        for f in ["etw/thread_map.rs", "ffi/thread_map.rs", "auto/top5.rs"] {
             keys.extend(literals(&std::fs::read_to_string(format!("{root}/src/{f}")).unwrap()));
         }
+        // 1.17.1: the all-threads block of the Game threads page.
+        let home = std::fs::read_to_string(format!("{root}/src/ffi/pages/home.rs")).unwrap();
+        let (a, b) = (home.find("fn gt_all(").unwrap(), home.find("fn mask_on()").unwrap());
+        keys.extend(literals(&home[a..b]));
+        keys.push("Other threads".into());
+        let other = std::fs::read_to_string(format!("{root}/src/ffi/pages/other.rs")).unwrap();
+        let a = other.find("(\"AllThreadsIdeal\"").unwrap();
+        keys.extend(literals(&other[a..a + other[a..].find('\n').unwrap()]));
+        assert!(keys.iter().any(|k| k.starts_with("All game threads: {0} threads")) && keys.iter().any(|k| k.starts_with("With Auto, every")));
         assert!(keys.len() > 50, "only {} texts found: the scan is broken", keys.len());
         let missing: Vec<&String> = keys.iter().filter(|k| !ru.map.get(*k).is_some_and(|v| !v.trim().is_empty())).collect();
         assert!(missing.is_empty(), "no Russian text for: {missing:?}");

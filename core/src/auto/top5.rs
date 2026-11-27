@@ -1,7 +1,9 @@
 //! The dynamic Top-5 mode (port of `Top5.cs`): the slot logic without any Windows call ([`Top5Plan`]) and the runner
 //! that keeps it in force on a game through the engine ([`Top5`]).
 
+use super::all_threads::{AllCounters, AllCpus, AllEvent, AllPlan, AllReason, AllRelease, AllThread};
 use crate::base::app_log::{AppLog, Sev};
+use crate::base::l::L;
 use crate::base::fmt::Culture;
 use crate::base::hooks::lock;
 use crate::base::model::ThreadSnap;
@@ -14,6 +16,7 @@ use crate::topo::masks::Masks;
 use crate::topo::model::Topo;
 use indexmap::{IndexMap, IndexSet};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// The numbers of the dynamic Top-5 mode. Not settings: nobody can set them wrong.
@@ -123,6 +126,11 @@ impl Top5Plan {
 
     pub fn slot_count(&self) -> i32 {
         self.slots as i32
+    }
+
+    /// 1.17.1: the processors of every slot, filled or not (kept free for Top-5 by the all-threads layer).
+    pub fn slot_mask(&self) -> u64 {
+        self.lp.iter().take(self.slots).filter(|lp| **lp < 64).fold(0u64, |m, lp| m | 1u64 << lp)
     }
 
     fn bonus(r: ThreadRole) -> f64 {
@@ -416,6 +424,8 @@ struct H {
     cycles: u64,
     cpu: u64,
     first: bool,
+    /// processors busy since the last tick (1.0 = one logical processor)
+    load: f64,
 }
 
 struct Meta {
@@ -441,10 +451,41 @@ struct St {
     failures: i32,
     running: bool,
     exe: String,
+    // 1.17.1: ideal cores for all game threads (auto::all_threads), on the same tick.
+    all: Option<AllPlan>,
+    all_topo: Option<Topo>,
+    all_buf: Vec<AllThread>,
+    all_items: Vec<(u32, Handle, i64, u32)>,
+    all_ok: Vec<bool>,
+    busy: Vec<f64>,
+    all_logged: bool,
+}
+
+/// What the all-threads layer shows on the Game threads page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AllView {
+    /// the setting
+    pub on: bool,
+    /// the layer runs on a game now
+    pub running: bool,
+    /// threads the layer gave an ideal processor (written)
+    pub placed: i32,
+    /// threads whose ideal processor was already right (kept without a write)
+    pub kept: i32,
+    /// processors in use by those threads
+    pub cpus: u64,
+    /// driver-busy processors kept free
+    pub driver: u64,
+    pub counters: AllCounters,
+    /// newest first
+    pub events: Vec<AllEvent>,
 }
 
 pub type WaitOfFn = dyn Fn(u32) -> f64 + Send + Sync;
 pub type IrqSharesFn = dyn Fn() -> Option<Vec<f64>> + Send + Sync;
+/// 1.17.1: fills the DPC/ISR share of every processor (zeros when the live trace is off) and returns the
+/// graphics-driver cores (EtwIrq::shares, EtwIrq::gpu_cores).
+pub type DriverFn = dyn Fn(&Topo, &mut [f64; 64]) -> u64 + Send + Sync;
 
 /// Runs the plan on a game: keeps one handle per thread open (a thread is opened once, when it appears), reads the
 /// cycle counters every tick, and writes only the differences through the engine (baseline, birth check, revert,
@@ -456,6 +497,8 @@ pub struct Top5 {
     st: Mutex<St>,
     wait_of: RwLock<Option<Arc<WaitOfFn>>>,
     irq_shares: RwLock<Option<Arc<IrqSharesFn>>>,
+    drivers: RwLock<Option<Arc<DriverFn>>>,
+    all_on: AtomicBool,
 }
 
 impl Top5 {
@@ -480,9 +523,18 @@ impl Top5 {
                 failures: 0,
                 running: false,
                 exe: String::new(),
+                all: None,
+                all_topo: None,
+                all_buf: Vec::with_capacity(1024),
+                all_items: Vec::with_capacity(64),
+                all_ok: Vec::with_capacity(64),
+                busy: Vec::with_capacity(64),
+                all_logged: false,
             }),
             wait_of: RwLock::new(None),
             irq_shares: RwLock::new(None),
+            drivers: RwLock::new(None),
+            all_on: AtomicBool::new(true),
         }
     }
 
@@ -493,6 +545,36 @@ impl Top5 {
     /// 1.16.1 Test 2: DPC/ISR share (0..1) per processor from the live interrupt trace; None = unknown.
     pub fn set_irq_shares(&self, f: Option<Arc<IrqSharesFn>>) {
         *self.irq_shares.write().unwrap_or_else(|e| e.into_inner()) = f;
+    }
+
+    /// 1.17.1: the driver-busy processors for the all-threads layer (the hub hands EtwIrq over).
+    pub fn set_drivers(&self, f: Option<Arc<DriverFn>>) {
+        *self.drivers.write().unwrap_or_else(|e| e.into_inner()) = f;
+    }
+
+    /// 1.17.1: setting "AllThreadsIdeal" (on by default). Off: the next tick puts the layer's values back.
+    pub fn set_all_threads(&self, on: bool) {
+        self.all_on.store(on, Ordering::SeqCst);
+    }
+    pub fn all_threads(&self) -> bool {
+        self.all_on.load(Ordering::SeqCst)
+    }
+
+    /// The all-threads layer for the page.
+    pub fn all_view(&self) -> AllView {
+        let s = lock(&self.st);
+        let mut v = AllView { on: self.all_threads(), ..Default::default() };
+        if let Some(p) = s.all.as_ref() {
+            let (w, k, cpus) = p.tracked();
+            v.running = s.running && v.on;
+            v.placed = w;
+            v.kept = k;
+            v.cpus = cpus;
+            v.driver = p.driver_cpus();
+            v.counters = p.counters();
+            v.events = p.events();
+        }
+        v
     }
 
     pub fn running(&self) -> bool {
@@ -544,6 +626,9 @@ impl Top5 {
         s.failures = 0;
         s.log.clear();
         s.running = true;
+        s.all = Some(AllPlan::new(AllCpus::new(t, mask)));
+        s.all_topo = Some(t.clone());
+        s.all_logged = false;
         true
     }
 
@@ -586,6 +671,9 @@ impl Top5 {
         let reverts = self.e.reverts();
         if reverts != s.reverts {
             s.applied.clear(); // the engine put everything back (a revert or the frame-time check)
+            if let Some(p) = s.all.as_mut() {
+                p.reset();
+            }
             s.reverts = reverts;
         }
         // Handles: a thread is opened once; ended threads are closed.
@@ -608,7 +696,7 @@ impl Top5 {
             }
             let (mut born, mut ku) = (0i64, 0u64);
             self.n.thread_times(th, &mut born, &mut ku);
-            s.h.insert(tid, H { handle: th, born, cycles: 0, cpu: 0, first: true });
+            s.h.insert(tid, H { handle: th, born, cycles: 0, cpu: 0, first: true, load: 0.0 });
         }
         let dt = if s.prev_at == DateTime::MIN { 0.0 } else { (now - s.prev_at).total_seconds() };
         s.prev_at = now;
@@ -624,6 +712,7 @@ impl Top5 {
             }
             let (mut c, mut cpu) = (0i64, 0u64);
             self.n.thread_times(h.handle, &mut c, &mut cpu);
+            h.load = if !h.first && dt > 0.0 && cpu >= h.cpu { (cpu - h.cpu) as f64 / 1e7 / dt } else { 0.0 };
             if !h.first && cycles >= h.cycles {
                 delta.insert(*tid, cycles - h.cycles);
                 total = total.wrapping_add(cycles - h.cycles);
@@ -666,6 +755,8 @@ impl Top5 {
                 let (d_tot, d_idle) = (tot[i] - pt[i], idle[i] - pi[i]);
                 busy[i] = if d_tot > 0 { (1.0 - d_idle as f64 / d_tot as f64).clamp(0.0, 1.0) } else { 0.0 };
             }
+            s.busy.clear();
+            s.busy.extend_from_slice(&busy);
             let mut own: HashMap<u32, f64> = HashMap::new();
             for (tid, a) in &s.applied {
                 *own.entry(a.0).or_insert(0.0) += cpu_share.get(tid).copied().unwrap_or(0.0);
@@ -691,6 +782,8 @@ impl Top5 {
                     0.0
                 }
             }));
+        } else {
+            s.busy.clear();
         }
         s.idle = Some(idle);
         s.total = Some(tot);
@@ -705,7 +798,100 @@ impl Top5 {
             }
         }
         self.reconcile(&mut s);
+        self.all_tick(&mut s, now);
         moves
+    }
+
+    /// 1.17.1: the other game threads get their ideal processors (auto::all_threads), after Top-5 placed its five.
+    fn all_tick(&self, s: &mut St, now: DateTime) {
+        if !self.all_threads() {
+            if s.all.as_ref().map(|p| p.owned().next().is_some()).unwrap_or(false) {
+                let n = self.all_release(s);
+                AppLog::add(lf!("All game threads: off, {0} ideal processors put back", n));
+            }
+            s.all_logged = false;
+            return;
+        }
+        let Some(topo) = s.all_topo.as_ref() else { return };
+        let Some(plan) = s.all.as_mut() else { return };
+        s.all_buf.clear();
+        for (tid, h) in s.h.iter() {
+            let slot = s.applied.get(tid).map(|a| a.0 as i32);
+            let allowed = s.meta.get(tid).map(|m| m.born == h.born).unwrap_or(false);
+            let ideal = match slot {
+                Some(lp) => lp,
+                None if allowed => {
+                    let mut v = 0u32;
+                    if self.n.get_thread_ideal(h.handle, &mut v) && v < 64 {
+                        v as i32
+                    } else {
+                        -1
+                    }
+                }
+                None => -1,
+            };
+            s.all_buf.push(AllThread { tid: *tid, born: h.born, load: h.load, ideal, top5: slot.is_some(), allowed });
+        }
+        let mut irq = [0.0f64; 64];
+        let drivers = self.drivers.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let gpu = drivers.map(|f| f(topo, &mut irq)).unwrap_or(0);
+        plan.step(now, &s.all_buf, &s.busy, &irq, gpu, s.plan.slot_mask());
+        for k in 0..plan.releases.len() {
+            let (tid, how) = plan.releases[k];
+            match how {
+                AllRelease::Restore => {
+                    if let Some(h) = s.h.get(&tid) {
+                        self.e.release_ideal(s.pid, tid, h.handle);
+                    }
+                }
+                AllRelease::Forget => self.e.forget_ideal(s.pid, tid),
+            }
+        }
+        let first = plan.writes.iter().any(|w| w.reason == AllReason::New);
+        if !plan.writes.is_empty() {
+            if self.e.gate(s.pid).is_some() {
+                plan.cancel(); // nothing is written while the guard (anti-cheat, denylist) refuses the process
+                return;
+            }
+            s.all_items.clear();
+            for w in &plan.writes {
+                let h = &s.h[&w.tid];
+                s.all_items.push((w.tid, h.handle, h.born, w.to));
+            }
+            self.e.place_ideals(s.pid, &s.all_items, &mut s.all_ok);
+            for k in 0..plan.writes.len() {
+                plan.confirm(now, k, s.all_ok.get(k).copied().unwrap_or(false));
+            }
+        }
+        // One line once the first placement is done and Top-5 holds all its slots.
+        if !s.all_logged && !first && s.view.len() as i32 >= s.plan.slot_count() {
+            let (w, k, cpus) = plan.tracked();
+            if w + k > 0 {
+                s.all_logged = true;
+                let d = plan.driver_cpus();
+                let drivers = if d == 0 { L::t("none").to_string() } else { Masks::ranges(d) };
+                AppLog::add(lf!("All game threads: {0} threads on cpus {1} (driver cpus {2} avoided)", w + k, Masks::ranges(cpus), drivers));
+            }
+        }
+    }
+
+    /// Puts back every ideal processor the all-threads layer owns (only where the value is still ours); returns how
+    /// many were written.
+    fn all_release(&self, s: &mut St) -> i32 {
+        let Some(plan) = s.all.as_mut() else { return 0 };
+        let owned: Vec<u32> = plan.owned().map(|o| o.0).collect();
+        let mut n = 0;
+        for tid in owned {
+            if let Some(h) = s.h.get(&tid) {
+                if self.e.release_ideal(s.pid, tid, h.handle) {
+                    n += 1;
+                }
+            } else {
+                self.e.forget_ideal(s.pid, tid);
+            }
+        }
+        plan.reset();
+        n
     }
 
     /// Makes Windows match the plan: only the differences are written.
@@ -750,6 +936,7 @@ impl Top5 {
 
     fn stop_locked(&self, s: &mut St, release: bool) {
         if release {
+            self.all_release(s);
             let tids: Vec<u32> = s.applied.keys().copied().collect();
             for tid in tids {
                 if let Some(h) = s.h.get(&tid) {
@@ -766,6 +953,9 @@ impl Top5 {
         s.known.clear();
         s.view = Vec::new();
         s.running = false;
+        s.all = None;
+        s.all_topo = None;
+        s.all_logged = false;
     }
 
     /// `Dispose()`.

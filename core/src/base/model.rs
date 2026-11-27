@@ -276,6 +276,10 @@ pub struct ThrBefore {
     /// The thread's selected CPU Sets before the program touched them.
     pub sets: Vec<u32>,
     pub born: i64,
+    /// 1.17.1: only the ideal processor was taken (the all-threads layer of Dynamic Top-5): priority, boost and CPU
+    /// Sets were never read nor changed, and the ideal processor goes back only while it is still the value the
+    /// program set.
+    pub ideal_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

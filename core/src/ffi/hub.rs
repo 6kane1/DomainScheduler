@@ -502,6 +502,18 @@ impl Hub {
         self.probe_on.store(Settings::get_bool_or("WaitProbe", true), Ordering::SeqCst);
         Guard::set_faceit_cs2_allowed(Settings::get_bool_or("FaceitCs2", true));
         self.live_irq_mask.store(Settings::get_bool_or("LiveIrqMask", true), Ordering::SeqCst);
+        // 1.17.1: ideal cores for all game threads (Dynamic Top-5's other threads), on by default; it keeps off the
+        // processors drivers keep busy (the live DPC/ISR trace's shares and graphics-driver cores, when it runs).
+        let dyn_ = self.auto.dynamic();
+        dyn_.set_all_threads(Settings::get_bool_or("AllThreadsIdeal", true));
+        let irq = self.irq.clone();
+        dyn_.set_drivers(Some(Arc::new(move |t: &Topo, sh: &mut [f64; 64]| {
+            if !irq.available() {
+                return 0;
+            }
+            *sh = irq.shares();
+            irq.gpu_cores(Some(t))
+        })));
         let mut mask_name = "auto".to_string();
         self.game_mask_value.store(0, Ordering::SeqCst);
         if let Some(topo) = TopoBuilder::live() {

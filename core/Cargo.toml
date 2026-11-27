@@ -1,6 +1,6 @@
 [package]
 name = "dos_core"
-version = "1.17.0"
+version = "1.17.1"
 edition = "2021"
 description = "Domain OS Toolbox logic (Rust core of the native Toolbox)"
 license-file = "../LICENSE"

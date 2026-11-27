@@ -29,6 +29,13 @@ storage, the command-line switches and the scheduled task of the C# Toolbox 1.16
 - **Dynamic Top-5.** The five busiest threads of the game are re-ranked every second and moved
   between cores and priorities as the load changes. (The older "role plan" mode was removed in
   1.16.0 Test 1.9: in the developer's measurements it only made things worse.)
+- **Ideal cores for all game threads** (1.17.1, Settings and Game threads page, on). With Auto, every other thread of
+  the game (DLL threads too) gets a preferred core: never core 0, never a Top-5 core (its SMT sibling only after every
+  quiet core), never a core drivers keep busy (DPC/ISR from the live trace, held 60 s), only P-cores on hybrid CPUs,
+  inside the core mask when one is in force. New threads get theirs within about 2 s; a thread moves only for a clear
+  reason (3 ticks of hysteresis, 2 s dwell, at most 2 moves per second). Only the ideal processor is written: no
+  affinity, no CPU Sets, no priority; the threads still migrate. A thread that enters Top-5 belongs to Top-5; a value
+  someone else set is left alone; Auto off puts back only the values that are still Toolbox's own.
 - **Watchlist and denylist.** Only programs you mark are tuned. System-critical processes and
   anti-cheat software are never opened or changed.
 - **Background layer.** While a watched game runs, other programs get Below-normal priority,
@@ -151,7 +158,15 @@ offers a small, careful overclock with named profiles, one of which can be appli
 
 ## Project status
 
-Released version: **1.17.0** (shipped with playbook 2.3.2, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)). New since 1.16.1:
+Version **1.17.1** (delivered through Toolbox's own update). New since 1.17.0:
+
+- **Ideal cores for all game threads**: Dynamic Top-5 now also looks after every other thread of the game (DLL threads
+  too) on the same one-second tick: each gets a preferred core away from core 0, the Top-5 cores and the cores drivers
+  keep busy, and is moved only for a clear reason. Switch in Settings and on the Game threads page (on), with a short
+  line of what it did and its last moves. On the developer's 7800X3D (Top-5 on 2, 4, 6, 8, 10, graphics driver on
+  12-15) the other threads use 3, 5, 7, 9 and 11. The tick costs about 7 µs for 150 threads and allocates nothing.
+
+Version **1.17.0** (shipped with playbook 2.3.2, built and attested by GitHub, in [Releases](https://github.com/6kane1/DomainOS/releases)). New since 1.16.1:
 
 - **Native program**: the same Toolbox rebuilt as a Rust core and a C++20 window (Dear ImGui, DirectX 11, Win32), one
   static exe of about 8 MB instead of the self-contained .NET 8 / WPF exe of about 71 MB. Same exe name, install folder,
@@ -184,7 +199,7 @@ Previous version **1.16.0** (shipped with playbook 2.3.0). New since 1.15.0:
 - **6 cores or fewer** (one cache domain, no E-cores): Auto gives the game every core and the device layout gives no device a core of its own. On a tester's i5-10400F the old mask cost 6% of the 1% low in CS2. 8 cores and more work as in 1.15.0. Setting `AutoMask` auto | on | off (`--auto-mask`), `--auto on|off|status` for scripted measurements.
 - Check page (one measured run), crash memory of the GPU overclock, own load per thread, shorter texts in Settings.
 
-Test builds are encrypted and live in a private repository that only the developer and invited testers can see. 376 automated tests run against a simulated Windows (`cargo test`, see [Tests](#tests)), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
+Test builds are encrypted and live in a private repository that only the developer and invited testers can see. 401 automated tests run against a simulated Windows (`cargo test`, see [Tests](#tests)), including fuzz tests of every parser of outside data and a key-rotation drill. Hardware coverage is narrow: please report your CPU, Windows build and before/after numbers in the issues.
 
 ## Build from source
 
@@ -265,7 +280,7 @@ cd core && cargo test --locked --features testsupport   # 344 unit tests + 4 int
 cd threadmap && cargo test --locked                     # 28 tests
 ```
 
-376 tests on Linux. A Windows build of the tests runs 350 core tests (6 of them only exist on Windows). The logic runs
+401 tests on Linux. A Windows build of the tests runs 364 core tests (6 of them only exist on Windows). The logic runs
 against a fake Windows, so nothing on the PC is changed. On GitHub, `tests.yml` runs these tests on Ubuntu (area G of
 `tests/run-all.py`) and on windows-latest.
 
@@ -278,7 +293,7 @@ build-provenance attestation and an attested SPDX SBOM (`tools/make-sbom-native.
 the build tools). Check any copy with the GitHub CLI:
 
 ```
-gh attestation verify DomainOS-Toolbox-1.17.0.exe -R 6kane1/DomainOS
+gh attestation verify DomainOS-Toolbox-1.17.1.exe -R 6kane1/DomainOS
 ```
 
 ## Compatibility with the C# Toolbox
