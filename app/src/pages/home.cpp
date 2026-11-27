@@ -1,5 +1,5 @@
 // HomeView.cs: the simple home screen in the HUD look (1.14.0): the game's frame time of the last minute, the
-// processor map, the Auto / Auto-tune / device optimization cards, three plain facts and "This system".
+// processor map, the Auto / device optimization cards, three plain facts and "This system".
 // Nothing here runs while the window is hidden or minimized: Tick is called only by a visible window, and the 4 Hz
 // chart timer runs only while the home screen is on screen, a game is handled and the live charts are on.
 // Owner: app pages A.
@@ -419,7 +419,7 @@ private:
 		}
 	}
 
-	// ---- right: the update card, Auto, Auto-tune (+ banner), devices (+ "Put back"), This system (fills)
+	// ---- right: the update card, Auto, devices (+ "Put back"), This system (fills)
 	void Right(ImRect r)
 	{
 		ImGui::SetCursorScreenPos(r.Min);
@@ -427,7 +427,6 @@ private:
 			ui::Box b(r.Min.x, r.Max.x);
 			UpdateCard();
 			AutoCard();
-			TuneCard();
 			DevCard();
 		}
 		float y = ImGui::GetCursorScreenPos().y + ui::S(8);
@@ -504,69 +503,6 @@ private:
 			// _auto.IsEnabled = false; H.Paused = false; Opt.Queue(Auto.Click).
 			autoClicked_ = true;
 			dos_auto_click();
-		}
-	}
-
-	void TuneCard()
-	{
-		const json::Value& t = h_["tuner"];
-		bool running = t["running"].Bool();
-		Card c;
-		c.title = running ? L::T("Stop auto-tune") : L::T("Auto-tune");
-		c.titleBrush = running ? "AccentText" : "Strong";
-		c.tag = running ? t["tag"].Str() : "";
-		c.tagLook = "accent";
-		c.sub = t["sub"].Str();
-		c.enabled = t["enabled"].Bool();
-		c.bg = running ? "AccentSoft" : "Panel";
-		c.line = running ? "AccentLine" : "Line";
-		c.marginTop = 8;
-		if (DrawCard("##tunecard", c)) pa::Quiet(bridge::TunerToggle(), [this](const json::Value&) { S->Refresh(); });
-		// The banner under it: the offer the tuner left (Apply / Not now), or "nothing needs to change" (OK).
-		int banner = t["banner"].Int();
-		if (banner == 0) return;
-		bool offer = banner == 1;
-		ui::Space(6);
-		ImDrawList* dl = ImGui::GetWindowDrawList();
-		dl->ChannelsSplit(2);
-		dl->ChannelsSetCurrent(1);
-		float bw = Px1();
-		ImVec2 p = ImGui::GetCursorScreenPos();
-		float x1 = ui::BoxRight();
-		bool apply = false, dismiss = false;
-		ImGui::SetCursorScreenPos(p + ImVec2(bw + ui::S(13), bw + ui::S(10)));
-		{
-			ui::Box b(p.x + bw + ui::S(13), x1 - bw - ui::S(13));
-			ui::TextStyle st;
-			st.size = ui::FsNote;
-			st.wrap = true;
-			st.lineHeight = ui::FsNote * 1.45f;
-			st.margin = ui::Thick(0, 0, 0, 9);
-			ui::TextEx(t["banner_text"].Str(), st);
-			ui::Row row(ui::Thick(0));
-			if (offer)
-			{
-				ui::ButtonStyle a = ui::BtnStyle(100);
-				a.margin = ui::Thick(0, 0, 8, 0);
-				ui::Primary(a);
-				apply = ui::Button(L::T("Apply") + "##tunerapply", a);
-			}
-			ui::ButtonStyle d = ui::BtnStyle(90);
-			d.margin = ui::Thick(0);
-			dismiss = ui::Button((offer ? L::T("Not now") : L::T("OK")) + "##tunerdismiss", d);
-		}
-		float y1 = ui::LastRect().Max.y + ui::S(11) + bw;
-		dl->ChannelsSetCurrent(0);
-		ImRect br(p, ImVec2(x1, y1));
-		ui::DrawBorder(dl, br, ui::C(offer ? "AccentSoft" : "Panel"), ui::C(offer ? "AccentLine" : "Line"), 1, ui::Radius);
-		dl->ChannelsMerge();
-		ImGui::SetCursorScreenPos(p);
-		ui::Place(br.GetSize());
-		if (apply) pa::Quiet(bridge::TunerApply(), [this](const json::Value&) { S->Refresh(); });
-		if (dismiss)
-		{
-			bridge::TunerDismiss();
-			S->Refresh();
 		}
 	}
 

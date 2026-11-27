@@ -74,8 +74,12 @@ impl GameProbe for NativeProbe {
         if h.is_null() {
             return false;
         }
+        // 1.17.2: a kernel anti-cheat (FACEIT) may let the open succeed and strip the rights from the handle; then the
+        // module list is empty. Readable means the module list was actually read, otherwise CS2 under FACEIT was taken
+        // for "readable without graphics modules: not a game" and never found.
+        let readable = !crate::native::win::modules(h).is_empty();
         close_handle(h);
-        true
+        readable
     }
     fn self_pid(&self) -> u32 {
         self.0.self_pid()

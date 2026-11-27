@@ -534,7 +534,7 @@ impl Top5 {
             wait_of: RwLock::new(None),
             irq_shares: RwLock::new(None),
             drivers: RwLock::new(None),
-            all_on: AtomicBool::new(true),
+            all_on: AtomicBool::new(true), // the app sets it from the setting at start (off by default since 1.17.2)
         }
     }
 
@@ -552,7 +552,7 @@ impl Top5 {
         *self.drivers.write().unwrap_or_else(|e| e.into_inner()) = f;
     }
 
-    /// 1.17.1: setting "AllThreadsIdeal" (on by default). Off: the next tick puts the layer's values back.
+    /// 1.17.1: setting "AllThreadsIdeal" (off by default since 1.17.2). Off: the next tick puts the layer's values back.
     pub fn set_all_threads(&self, on: bool) {
         self.all_on.store(on, Ordering::SeqCst);
     }

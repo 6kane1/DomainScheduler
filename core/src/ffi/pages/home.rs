@@ -1,9 +1,8 @@
 //! HomeView.cs, QuickPage.cs, GameThreadsPage.cs, SystemPanel.cs and the shared getters (topology, ranges).
 
-use super::{did, hex, mask, queued, s, task};
+use super::{did, hex, mask, s, task};
 use crate::auto::controller::AutoState;
 use crate::auto::hud::{CoreKind, FrameStats, HudMath};
-use crate::auto::tuner::AbTuner;
 use crate::base::app_log::Sev;
 use crate::base::fmt::{num, Culture};
 use crate::base::flags::Flags;
@@ -136,38 +135,6 @@ fn home() -> Value {
         sub = format!("{}\n{}", sub, blocked);
     }
 
-    // Auto-tune card
-    let tuner = {
-        let t = lock(&h.tuner);
-        let running = t.tuner.running();
-        let (idx, cnt) = (t.tuner.step_index(), t.tuner.step_count());
-        let pending = t.pending.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-        let no_gain = t.no_gain && !running;
-        let (banner, banner_text) = if t.pending.is_some() && !running {
-            (1, format!("{}\n{}", t.offer, L::t("Apply the new values? The current ones stay until you press Apply.")))
-        } else if no_gain {
-            (2, L::t("Auto-tune finished: the current settings were the best, nothing needs to change.").to_string())
-        } else {
-            (0, String::new())
-        };
-        if running {
-            let left = (((cnt - idx) * (AbTuner::PHASE_SECONDS + AbTuner::LAG_SECONDS)) as f64 / 60.0).ceil() as i32;
-            json!({"running": true, "step_index": idx, "step_count": cnt, "left_min": left,
-                "tag": format!("{}/{}", idx + 1, cnt),
-                "sub": lf!("Step {0} of {1} · about {2} min left · keep playing", idx + 1, cnt, left),
-                "enabled": true, "banner": banner, "banner_text": banner_text, "pending": pending})
-        } else {
-            let sub = if !frames_ok {
-                L::t("frame time cannot be measured here")
-            } else if active {
-                L::t("about 8 minutes while you play")
-            } else {
-                L::t("turn on Auto and start the game")
-            };
-            json!({"running": false, "step_index": idx, "step_count": cnt, "left_min": 0, "tag": "", "sub": sub,
-                "enabled": active && frames_ok, "banner": banner, "banner_text": banner_text, "pending": pending})
-        }
-    };
 
     // Device optimization card
     let game = auto.game_pid() != 0;
@@ -228,7 +195,7 @@ fn home() -> Value {
         "active": active, "frames_ok": frames_ok, "live_charts": live_charts,
         "chart_wanted": live_charts && active && frames_ok,
         "auto_sub": sub, "auto_faulted": st == AutoState::Faulted,
-        "tuner": tuner, "dev": dev, "stats": stats_json(&stats), "empty": empty,
+        "dev": dev, "stats": stats_json(&stats), "empty": empty,
         "map": map(&h),
         "background_count": h.engine.background_count(),
     })
@@ -308,21 +275,6 @@ fn home_chart() -> Value {
     });
     h.note_chart(ms);
     v
-}
-
-fn tuner_toggle() -> u64 {
-    let Some(h) = app::hub() else { return 0 };
-    let running = lock(&h.tuner).tuner.running();
-    queued(move || {
-        let msg = if running { None } else { Some(h.tuner_start()) };
-        if running {
-            h.tuner_stop(L::t("stopped by the user"));
-        }
-        if let Some(m) = &msg {
-            did(m, Sev::Info);
-        }
-        json!({"msg": msg})
-    })
 }
 
 fn devices_optimize() -> u64 {
@@ -788,12 +740,6 @@ pub fn do_(name: &str, a: &Value) -> Option<Value> {
             hardware::open_link(&s(a, "url"));
             json!({})
         }
-        "tuner_dismiss" => {
-            if let Some(h) = app::hub() {
-                h.tuner_dismiss();
-            }
-            json!({})
-        }
         "mask_toggle" => mask_toggle(),
         // HomeView's constructor: SelfThreads.Register(L.N("window")) on the UI thread (pages A, appended).
         "self_thread_window" => {
@@ -806,14 +752,6 @@ pub fn do_(name: &str, a: &Value) -> Option<Value> {
 
 pub fn start(name: &str, _a: &Value) -> Option<u64> {
     Some(match name {
-        "tuner_toggle" => tuner_toggle(),
-        "tuner_apply" => {
-            let Some(h) = app::hub() else { return Some(0) };
-            queued(move || {
-                h.tuner_apply_pending();
-                json!({})
-            })
-        }
         "devices_optimize" => devices_optimize(),
         "devices_put_back" => devices_put_back(),
         _ => return None,

@@ -1,10 +1,9 @@
 //! Port of Hub.cs: the long-lived objects and their wiring (Configure), the 1 s ticks of the live trace, the wait
-//! probe and the black box, the automatic A/B tuner, the GPU overclock at start, the own-load numbers.
+//! probe and the black box, the GPU overclock at start, the own-load numbers.
 //! C# fields read by several threads become atomics or locks; the objects themselves are shared `Arc`s.
 
 use crate::auto::burst_guard::BurstGuard;
 use crate::auto::controller::AutoController;
-use crate::auto::tuner::{AbTuner, Step, TunerVariant};
 use crate::base::app_log::{AppLog, Sev};
 use crate::base::ci::{CiMap, CiMapExt, CiSet, CiSetExt};
 use crate::base::flags::Flags;
@@ -14,7 +13,7 @@ use crate::base::model::{GameMaskInfo, Preset};
 use crate::base::settings::Settings;
 use crate::base::time::{DateTime, TimeSpan};
 use crate::engine::{Engine, Guard, SoftClose, SysLayer, ThreadIni};
-use crate::etw::{BlackBox, EtwFrames, EtwIrq, IFrameSource, ReadyProbe};
+use crate::etw::{BlackBox, EtwFrames, EtwIrq, ReadyProbe};
 use crate::gpu::{AmdOc, GpuOc, GpuOcLogic, GpuProfiles, NvOc, Start};
 use crate::lf;
 use crate::native::self_threads::SelfThreads;
@@ -57,15 +56,6 @@ struct SelfStats {
     chart_ms: f64,
 }
 
-/// The tuner and what it leaves behind (C# `Tuner`, `_tunerOriginal`, `TunerPending`, `TunerOffer`, `TunerNoGain`).
-pub struct TunerState {
-    pub tuner: AbTuner,
-    pub original: Option<TunerVariant>,
-    pub pending: Option<TunerVariant>,
-    pub offer: String,
-    pub no_gain: bool,
-}
-
 pub struct Hub {
     me: Weak<Hub>,
     pub engine: Arc<Engine>,
@@ -95,7 +85,6 @@ pub struct Hub {
     paused: AtomicBool,
     reapply_ticks: AtomicI32,
     watch: RwLock<Arc<CiSet>>,
-    pub tuner: Mutex<TunerState>,
     /// Live DPC/ISR trace while a game runs (latency watchdog); LiveIrqMask: Auto keeps the game off busy interrupt cores.
     live_irq_on: AtomicBool,
     live_irq_mask: AtomicBool,
@@ -134,7 +123,6 @@ impl Hub {
             paused: AtomicBool::new(false),
             reapply_ticks: AtomicI32::new(10),
             watch: RwLock::new(Arc::new(CiSet::new())),
-            tuner: Mutex::new(TunerState { tuner: AbTuner::new(), original: None, pending: None, offer: String::new(), no_gain: false }),
             live_irq_on: AtomicBool::new(true),
             live_irq_mask: AtomicBool::new(true),
             live_ticks: AtomicI32::new(0),
@@ -502,10 +490,11 @@ impl Hub {
         self.probe_on.store(Settings::get_bool_or("WaitProbe", true), Ordering::SeqCst);
         Guard::set_faceit_cs2_allowed(Settings::get_bool_or("FaceitCs2", true));
         self.live_irq_mask.store(Settings::get_bool_or("LiveIrqMask", true), Ordering::SeqCst);
-        // 1.17.1: ideal cores for all game threads (Dynamic Top-5's other threads), on by default; it keeps off the
+        // 1.17.1: ideal cores for all game threads (Dynamic Top-5's other threads); off by default since 1.17.2 (owner,
+        // after a laptop report of flicker and shader-compile-like stutters with 1.17.1); it keeps off the
         // processors drivers keep busy (the live DPC/ISR trace's shares and graphics-driver cores, when it runs).
         let dyn_ = self.auto.dynamic();
-        dyn_.set_all_threads(Settings::get_bool_or("AllThreadsIdeal", true));
+        dyn_.set_all_threads(Settings::get_bool_or("AllThreadsIdeal", false));
         let irq = self.irq.clone();
         dyn_.set_drivers(Some(Arc::new(move |t: &Topo, sh: &mut [f64; 64]| {
             if !irq.available() {
@@ -555,181 +544,9 @@ impl Hub {
         self.reapply_ticks.store((ms / 1000).clamp(1, 1000), Ordering::SeqCst);
     }
 
-    // ---- the automatic A/B tuner -------------------------------------------------------------------------------
-
-    fn frames_available(&self) -> bool {
-        self.frames.as_ref().map(|f| f.available()).unwrap_or(false)
-    }
-
-    /// Starts the tuner while Auto handles a game; returns a message for the log.
-    pub fn tuner_start(&self) -> String {
-        if lock(&self.tuner).tuner.running() {
-            return L::t("Auto-tune is already running").to_string();
-        }
-        if !self.auto.on() || self.auto.game_pid() == 0 {
-            return L::t("Auto-tune: turn Auto on and start the game first, then press the button again").to_string();
-        }
-        if !self.frames_available() {
-            return L::t("Auto-tune needs the frame-time measurement, which is not available here").to_string();
-        }
-        let live = self.live_irq_on();
-        // 1.16.0 Test 1.9: the role plan is gone, so auto-tune compares only the interrupt-core rule (needs live DPC/ISR).
-        if !live {
-            return L::t("Auto-tune compares the interrupt-core rule: turn on \"Watch driver latency\" in Settings first").to_string();
-        }
-        let variants = vec![
-            TunerVariant::new(L::t("Dynamic Top-5"), true, false),
-            TunerVariant::new(L::t("Dynamic Top-5 + interrupt cores avoided"), true, true),
-        ];
-        let cur_live = live && self.live_irq_mask();
-        let top5 = self.auto.top5_mode();
-        let baseline = variants.iter().position(|v| v.top5 == top5 && v.live_mask == cur_live).unwrap_or(0);
-        let (first, minutes) = {
-            let mut t = lock(&self.tuner);
-            t.original = Some(variants[baseline].clone());
-            t.pending = None;
-            t.offer = String::new();
-            t.no_gain = false;
-            let first = t.tuner.start(&variants, baseline as i32, now_utc());
-            (first, t.tuner.total().total_minutes().ceil() as i32)
-        };
-        if let Some(f) = first {
-            self.apply_variant(&f);
-        }
-        lf!("Auto-tune started: {0} combinations, about {1} minutes. Keep playing as usual; the game must stay in front.", variants.len() as i32, minutes)
-    }
-
-    pub fn tuner_stop(&self, why: &str) {
-        let original = {
-            let mut t = lock(&self.tuner);
-            if !t.tuner.running() {
-                return;
-            }
-            t.tuner.cancel();
-            t.original.clone()
-        };
-        if let Some(o) = original {
-            self.apply_variant(&o);
-        }
-        AppLog::add_sev(lf!("Auto-tune stopped ({0}): the previous settings are back", why), Sev::Warn);
-    }
-
-    fn tuner_offer_text(t: &AbTuner, winner: i32) -> String {
-        let (wl, wh) = t.stats(winner);
-        let (bl, bh) = t.stats(t.baseline());
-        lf!(
-            "Auto-tune found a better combination: {0}. 1% low {1:0} → {2:0} FPS, hitches {3} → {4}.",
-            &t.variants()[winner as usize].name,
-            bl,
-            wl,
-            bh,
-            wh
-        )
-    }
-
-    /// On the worker: applies and saves the combination the auto-tune found.
-    pub fn tuner_apply_pending(&self) {
-        let (v, running) = {
-            let t = lock(&self.tuner);
-            (t.pending.clone(), t.tuner.running())
-        };
-        let Some(v) = v else { return };
-        if !running {
-            self.apply_variant(&v);
-        }
-        let _ = Settings::set_bool("Top5On", v.top5);
-        if self.live_irq_on() {
-            let _ = Settings::set_bool("LiveIrqMask", v.live_mask);
-        }
-        {
-            let mut t = lock(&self.tuner);
-            t.pending = None;
-            t.offer = String::new();
-        }
-        AppLog::add(lf!("Auto-tune result applied: {0}", &v.name));
-    }
-
-    pub fn tuner_dismiss(&self) {
-        let mut t = lock(&self.tuner);
-        if t.pending.is_some() {
-            AppLog::add(L::t("Auto-tune result not applied: the current settings stay"));
-        }
-        t.pending = None;
-        t.offer = String::new();
-        t.no_gain = false;
-    }
-
-    fn apply_variant(&self, v: &TunerVariant) {
-        if self.auto.top5_mode() != v.top5 {
-            self.auto.set_top5(v.top5);
-        }
-        self.live_irq_mask.store(v.live_mask, Ordering::SeqCst);
-        if self.live_irq_on() && self.live_irq_mask() && self.irq.available() {
-            self.set_busy_hook();
-        } else {
-            BUSY_HOOK.set(None);
-        }
-    }
-
     fn set_busy_hook(&self) {
         let irq = self.irq.clone();
         BUSY_HOOK.set(Some(Arc::new(move |t: &Topo| irq.busy_cores_if_ready(Some(t)))));
-    }
-
-    /// Once a second on the worker.
-    pub fn tuner_tick(&self) {
-        if !lock(&self.tuner).tuner.running() {
-            return;
-        }
-        if !self.auto.on() || self.auto.game_pid() == 0 {
-            self.tuner_stop(L::t("the game ended or Auto was turned off"));
-            return;
-        }
-        let frames = self.frames.clone();
-        let (step, next) = {
-            let mut t = lock(&self.tuner);
-            let mut f = |from: DateTime, to: DateTime| frames.as_ref().map(|x| x.intervals(from, to)).unwrap_or_default();
-            t.tuner.tick(now_utc(), &mut f)
-        };
-        if step == Step::Switch {
-            if let Some(n) = next {
-                self.apply_variant(&n);
-                let t = lock(&self.tuner);
-                AppLog::add(lf!("Auto-tune {0}/{1}: {2}", t.tuner.step_index() + 1, t.tuner.step_count(), &n.name));
-            }
-        } else if step == Step::Finished {
-            // The current settings come back; a better combination is only offered (TunerPending), the user applies it.
-            let original = lock(&self.tuner).original.clone();
-            if let Some(o) = original {
-                self.apply_variant(&o);
-            }
-            let (table, verdict, winner) = {
-                let mut t = lock(&self.tuner);
-                let w = t.tuner.winner();
-                let pending = if w >= 0 && w != t.tuner.baseline() { Some(t.tuner.variants()[w as usize].clone()) } else { None };
-                t.offer = if pending.is_none() { String::new() } else { Self::tuner_offer_text(&t.tuner, w) };
-                t.no_gain = pending.is_none();
-                t.pending = pending;
-                (t.tuner.table(), t.tuner.verdict().to_string(), w)
-            };
-            AppLog::add(format!("{}\n{}", L::t("Auto-tune results (1% low per round):"), table));
-            AppLog::add_sev(&verdict, if winner >= 0 { Sev::Info } else { Sev::Warn });
-            // The result also goes to its own file in the state folder, next to the log.
-            let r = (|| -> Result<String, String> {
-                let dir = Store::dir()?;
-                let stamp = DateTime::now().format("yyyyMMdd-HHmm", &crate::base::fmt::Culture::invariant());
-                let file = dir.join(format!("autotune-{}.txt", stamp));
-                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                let nl = "\r\n";
-                let text = format!("\u{feff}{}{nl}{}{nl}{nl}{}{nl}", L::t("Auto-tune results (1% low per round):"), table, verdict);
-                std::fs::write(&file, text).map_err(|e| e.to_string())?;
-                Ok(file.to_string_lossy().into_owned())
-            })();
-            match r {
-                Ok(f) => AppLog::add(lf!("Auto-tune results saved: {0}", f)),
-                Err(e) => AppLog::add_sev(lf!("Auto-tune results could not be saved: {0}", e), Sev::Warn),
-            }
-        }
     }
 
     // ---- live trace, wait probe, black box ---------------------------------------------------------------------

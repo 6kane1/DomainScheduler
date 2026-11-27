@@ -174,18 +174,6 @@ fn sample_cpu_gives_the_busy_share_per_processor() {
 }
 
 #[test]
-fn tuner_start_says_what_is_missing() {
-    let _g = static_hooks();
-    let _b = Settings::scoped_backend(Arc::new(MemorySettingsBackend::new()));
-    let _s = TempStore::new("tuner");
-    let h = hub_with(Arc::new(FakeNative::new()));
-    assert_eq!(h.tuner_start(), "Auto-tune: turn Auto on and start the game first, then press the button again");
-    h.tuner_dismiss();
-    h.tuner_stop("x"); // not running: nothing
-    h.tuner_tick();
-}
-
-#[test]
 fn self_line_before_the_first_minute() {
     let h = hub_with(Arc::new(FakeNative::new()));
     assert_eq!(h.self_line(), "Own load: measured after the first minute");

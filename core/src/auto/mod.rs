@@ -1,5 +1,5 @@
 //! auto: the one-button Auto mode and what runs with it (ports of AutoController.cs, Top5.cs, BurstGuard.cs,
-//! Tuner.cs, Hud.cs, CheckStats.cs).
+//! Hud.cs, CheckStats.cs).
 //!
 //! # API overview
 //!
@@ -28,8 +28,6 @@
 //!   Windows `burst_native::WinBurstNative`), `BurstGuard::new(Option<native>, Option<now>)` with `tick`, `release`,
 //!   `recover_after_crash`, `capped_count` and the C# fields as setters `set_on`, `set_soft`, `set_state_path`,
 //!   `set_logical`, `set_log`, `set_game_hard_faults`.
-//! - [`tuner`]: `TunerVariant`, `TunerPhase`, `Step`, `AbTuner` (`start`, `tick(now, &mut frames)`, `cancel`,
-//!   `measure`, `decide`, `stats`, `table`, getters).
 //! - [`hud`]: `FrameStats`, `CoreKind`, `HudMath` (`stats`, `percentile`, `is_hitch`, `buckets`, `align_end`, `nice`,
 //!   `chart_top`, `classify`, `elapsed`, `spaced`).
 //! - [`check_stats`]: `CheckResult`, `CheckStats::{from, report}`.
@@ -42,7 +40,6 @@ pub mod check_stats;
 pub mod controller;
 pub mod hud;
 pub mod top5;
-pub mod tuner;
 
 #[cfg(test)]
 mod tests;
@@ -54,4 +51,3 @@ pub use crate::etw::frames::IFrameSource;
 pub use hud::{CoreKind, FrameStats, HudMath};
 pub use all_threads::{AllCpus, AllEvent, AllPlan, AllPolicy, AllReason, AllThread};
 pub use top5::{AllView, Cand, Top5, Top5Plan, Top5Policy, Top5Slot};
-pub use tuner::{AbTuner, Step, TunerPhase, TunerVariant};

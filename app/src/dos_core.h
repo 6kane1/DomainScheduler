@@ -151,8 +151,6 @@ char* dos_tm_status(void);
        {"state","on","button_enabled","blocked","game_exe","active","frames_ok","live_charts",
         "chart_wanted": LiveCharts && Active && frames available (the page adds "on screen"),
         "auto_sub": the Auto card text (with "\n"+Blocked when on), "auto_faulted": bool,
-        "tuner":{"running","step_index","step_count","left_min","tag":"n/m","sub": the card text,"enabled",
-                 "banner": 0 none / 1 offer / 2 no gain, "banner_text","pending": name or ""},
         "dev":{"done","busy","game","home": BootGuard.HomeDevices (0 Offer,1 BlockedByGame,2 AppliedRestartNeeded,
                3 AppliedActive),"title","tag": text or "","note": text or "","note_warn","enabled","back": bool},
         "stats":{"valid","low1_fps","avg_fps","low01_fps","frame_ms","hitches_per_min","median_ms","p99_ms"},
@@ -161,9 +159,6 @@ char* dos_tm_status(void);
         "background_count"}
    get "home_chart"      -> ChartTick (call at 4 Hz while chart_wanted and on screen; it notes its own time):
        {"max":[240], "end":[240], "median_ms", "p99_ms"}  (HudMath.Buckets of the last minute, 250 ms buckets)
-   start "tuner_toggle"  -> Opt.Queue: TunerStart (msg logged) or TunerStop("stopped by the user"); {"msg": text|null}
-   start "tuner_apply"   -> Opt.Queue(TunerApplyPending)
-   do  "tuner_dismiss"
    start "devices_optimize" -> BusyTask: Flags devices-write open, IrqAuto.Apply(PlanNow()), InvalidateIrq, every line
                             logged, "Restart Windows: ..." logged. 0 when done/busy/a game runs.
    start "devices_put_back" -> BusyTask: Devices.RevertAll (+ the home/Devices message). 0 when busy or a game runs.
@@ -245,7 +240,6 @@ char* dos_tm_status(void);
    do  "setting_toggle" {"key","value"} -> Toggle(): SetBool, Configure, Did(on/off), the follow-up of BgOn/TimerGuard
    do  "sys_presets" {"value"} / "reapply_set" {"ms"} / "language_set" {"code"} / "home_charts" {"value"} /
        "watch_set" {"exe","on"} / "flag_set" {"key","open"} / "check_updates" {"value"}
-   start "tuner_start" / "tuner_stop" -> Opt.Queue
    start "resync"        -> worker: TopoBuilder.Invalidate, InvalidateIrq, Tables.Reload, LoadPresets, Configure,
                             Did("Resynced: ...")
    do  "factory_reset"   -> revert, Maintenance.FactoryReset, ExitApp (the app quits)

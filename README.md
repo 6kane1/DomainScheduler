@@ -33,7 +33,7 @@ storage, the command-line switches and the scheduled task of the C# Toolbox 1.16
 - **Dynamic Top-5.** The five busiest threads of the game are re-ranked every second and moved
   between cores and priorities as the load changes. (The older "role plan" mode was removed in
   1.16.0 Test 1.9: in the developer's measurements it only made things worse.)
-- **Ideal cores for all game threads** (1.17.1, Settings and Game threads page, on). With Auto, every other thread of
+- **Ideal cores for all game threads** (1.17.1, Settings and Game threads page; off by default since 1.17.2). With Auto, every other thread of
   the game (DLL threads too) gets a preferred core: never core 0, never a Top-5 core (its SMT sibling only after every
   quiet core), never a core drivers keep busy (DPC/ISR from the live trace, held 60 s), only P-cores on hybrid CPUs,
   inside the core mask when one is in force. New threads get theirs within about 2 s; a thread moves only for a clear
@@ -161,6 +161,16 @@ offers a small, careful overclock with named profiles, one of which can be appli
   Radeon cards: please report your card, driver version and what the page showed.
 
 ## Project status
+
+Version **1.17.2**, a very important hotfix (shipped with playbook 2.3.4 and through Toolbox's own update). New since 1.17.1:
+
+- **CS2 under FACEIT is found and kept.** FACEIT lets programs open cs2 but strips the rights of the handle, so 1.17.1
+  took the running game for ended a minute into a match and then did not find it again. The game's creation and CPU
+  time now come from the system's process list (no handle needed), and a process counts as readable only when its
+  module list was really read.
+- **"Ideal cores for all game threads" is off by default**: a laptop had flicker and shader-compile-like stutters with
+  it. Turned on by hand, it stays on.
+- **Auto-tune is removed** (no real benefit in measurements): the button, the card and its code are gone.
 
 Version **1.17.1** (delivered through Toolbox's own update). New since 1.17.0:
 
@@ -297,7 +307,7 @@ build-provenance attestation and an attested SPDX SBOM (`tools/make-sbom-native.
 the build tools). Check any copy with the GitHub CLI:
 
 ```
-gh attestation verify DomainOS-Toolbox-1.17.1.exe -R 6kane1/DomainOS
+gh attestation verify DomainOS-Toolbox-1.17.2.exe -R 6kane1/DomainOS
 ```
 
 ## Compatibility with the C# Toolbox

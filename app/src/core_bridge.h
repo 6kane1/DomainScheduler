@@ -1,5 +1,5 @@
 // C++ helpers over the core's page calls (dos_core.h): JSON arguments, parsed results, and one named function per
-// getter / command of the contract in dos_core.h, so a page calls bridge::Home() or bridge::TunerToggle() instead of
+// getter / command of the contract in dos_core.h, so a page calls bridge::Home() or bridge::DevicesOptimize() instead of
 // spelling names. Owner: ffi. Results that are jobs return the id for Shell::Busy (0 = nothing was started).
 #pragma once
 #include <cstdint>
@@ -66,9 +66,6 @@ inline void OpenLink(const std::string& url) { Do("open_link", Args().Add("url",
 // ---- home
 inline json::Value Home() { return Get("home"); }
 inline json::Value HomeChart() { return Get("home_chart"); }
-inline uint64_t TunerToggle() { return Start("tuner_toggle"); }
-inline uint64_t TunerApply() { return Start("tuner_apply"); }
-inline void TunerDismiss() { Do("tuner_dismiss"); }
 inline uint64_t DevicesOptimize() { return Start("devices_optimize"); }
 inline uint64_t DevicesPutBack() { return Start("devices_put_back"); }
 
@@ -138,8 +135,6 @@ inline void HomeCharts(bool v) { Do("home_charts", Args().Add("value", v)); }
 inline void WatchSet(const std::string& exe, bool on) { Do("watch_set", Args().Add("exe", exe).Add("on", on)); }
 inline void FlagSet(const char* key, bool open) { Do("flag_set", Args().Add("key", key).Add("open", open)); }
 inline void CheckUpdates(bool v) { Do("check_updates", Args().Add("value", v)); }
-inline uint64_t TunerStart() { return Start("tuner_start"); }
-inline uint64_t TunerStop() { return Start("tuner_stop"); }
 /// The native Settings button "Reload hardware and presets" (QuickPage.Resync).
 inline uint64_t Resync() { return Start("resync"); }
 inline void FactoryReset() { Do("factory_reset"); }

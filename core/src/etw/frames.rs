@@ -132,7 +132,7 @@ impl EtwFrames {
         let keep = self.inner.clone();
         let _ = raw::spawn_process("etw-frames", -1, Some(L::n("frame trace")), trace, keep);
         // Real-time ETW hands buffers over about once a second or when they fill; a flush twice a second keeps
-        // the frames close to the clock for the tuner and the watchdog (as Domain FrameTime does).
+        // the frames close to the clock for the watchdog (as Domain FrameTime does).
         let inner = self.inner.clone();
         let _ = std::thread::Builder::new().name("etw-frames-flush".into()).spawn(move || {
             raw::set_priority(-1);

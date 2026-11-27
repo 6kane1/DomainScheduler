@@ -9,7 +9,7 @@
 //! - [`app`]: `start(args, &mut show)` (= App.OnStartup), `exit_app`/`clean_up`, `install_update`, `roll_back`,
 //!   `factory_reset`, `install_hooks` (the start-up wiring of the other areas: system::deps, IrqAuto's boot guard,
 //!   Tables / ThreadIni hooks), `app()` / `hub()` (the running instance).
-//! - [`hub::Hub`]: `configure`, `live_tick`, `tuner_*`, `load_presets`, `mask_info`, `gpu_oc_startup`, `self_line` ...
+//! - [`hub::Hub`]: `configure`, `live_tick`, `load_presets`, `mask_info`, `gpu_oc_startup`, `self_line` ...
 //! - [`optimizer::Optimizer`]: the worker (`queue`, `run`, `run_now`) and the 1 s tick.
 //! - [`auto_command::AutoCommand`]: `--auto on|off|status` (`send`) and the running side (`new`, `mirror`).
 //! - [`update_service::UpdateService`]: update checks, downloads, the card's data.

@@ -134,7 +134,6 @@ impl Optimizer {
             part(0);
             h.live_tick();
             h.auto.tick();
-            h.tuner_tick();
             part(1);
             let on = h.auto.on();
             let mut num2 = if on { 5.clamp(1, 1000) } else if flag { 30.max(h.reapply_ticks()) } else { h.reapply_ticks() };

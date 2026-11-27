@@ -1,6 +1,7 @@
 //! IGameProbe over the Windows API (port of `WinProbe.cs`).
 
-use super::win::{self, close_handle, h, open_process, PROCESS_QUERY_LIMITED_INFORMATION};
+use super::win::{self, close_handle, h, open_process, NtQuerySystemInformation, PROCESS_QUERY_LIMITED_INFORMATION};
+use crate::base::app_log::{AppLog, Sev};
 use super::IGameProbe;
 use crate::base::ci;
 use crate::base::hooks::lock;
@@ -31,6 +32,58 @@ impl Default for WinGameProbe {
 impl WinGameProbe {
     pub fn new() -> Self {
         WinGameProbe { graphics: Mutex::new(HashMap::new()), self_pid: std::process::id() }
+    }
+}
+
+/// 1.17.2: creation time, CPU time (kernel + user, 100 ns) and session of a process from the system's process list
+/// (NtQuerySystemInformation, SystemProcessInformation = 5). Needs no handle to the process: a kernel anti-cheat
+/// (FACEIT) can refuse even PROCESS_QUERY_LIMITED_INFORMATION after a match starts, and then Toolbox took the running
+/// game for ended and could not find it again. Read only. x64 layout: CreateTime 0x20, UserTime 0x28, KernelTime 0x30,
+/// UniqueProcessId 0x50, SessionId 0x64.
+pub(crate) fn system_process_times(pid: u32) -> Option<(i64, i64, u32)> {
+    let mut size: u32 = 1 << 20;
+    for _ in 0..4 {
+        let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+        let mut got: u32 = 0;
+        let st = unsafe { NtQuerySystemInformation(5, buf.as_mut_ptr() as *mut _, size, &mut got) };
+        if st == 0xC0000004u32 as i32 {
+            size = got.max(size).saturating_mul(2);
+            continue;
+        }
+        if st != 0 {
+            return None;
+        }
+        let b = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, size as usize) };
+        let rd = |o: usize, n: usize| -> Option<&[u8]> { b.get(o..o + n) };
+        let mut off = 0usize;
+        loop {
+            let next = u32::from_le_bytes(rd(off, 4)?.try_into().ok()?) as usize;
+            let id = u64::from_le_bytes(rd(off + 0x50, 8)?.try_into().ok()?) as u32;
+            if id == pid {
+                let created = i64::from_le_bytes(rd(off + 0x20, 8)?.try_into().ok()?);
+                let user = i64::from_le_bytes(rd(off + 0x28, 8)?.try_into().ok()?);
+                let kernel = i64::from_le_bytes(rd(off + 0x30, 8)?.try_into().ok()?);
+                let session = u32::from_le_bytes(rd(off + 0x64, 4)?.try_into().ok()?);
+                return Some((created, user + kernel, session));
+            }
+            if next == 0 {
+                return None;
+            }
+            off += next;
+        }
+    }
+    None
+}
+
+/// Logs once per process that it cannot be opened or read and the system list is used instead.
+fn note_unopenable(pid: u32, err: u32) {
+    static SEEN: Mutex<Option<std::collections::HashSet<u32>>> = Mutex::new(None);
+    let mut g = lock(&SEEN);
+    if g.get_or_insert_with(Default::default).insert(pid) {
+        AppLog::add_sev(
+            format!("PID {pid}: the process cannot be opened or read (error {err}, an anti-cheat?); its CPU time is read from the system's process list"),
+            Sev::Info,
+        );
     }
 }
 
@@ -98,7 +151,16 @@ impl IGameProbe for WinGameProbe {
         *cpu100ns = 0;
         let x = open_process(PROCESS_QUERY_LIMITED_INFORMATION, pid);
         if x.is_null() {
-            return false;
+            let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            return match system_process_times(pid) {
+                Some((c, cpu, _)) => {
+                    note_unopenable(pid, err);
+                    *created = c;
+                    *cpu100ns = cpu;
+                    true
+                }
+                None => false,
+            };
         }
         let r = match win::get_process_times(x) {
             Some((c, _, k, u)) => {
@@ -106,7 +168,20 @@ impl IGameProbe for WinGameProbe {
                 *cpu100ns = k + u;
                 true
             }
-            None => false,
+            // 1.17.2: the open worked but the handle has no rights left (a kernel anti-cheat strips them from handles
+            // to its game): the same numbers from the system's process list.
+            None => {
+                let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+                match system_process_times(pid) {
+                    Some((c, cpu, _)) => {
+                        note_unopenable(pid, err);
+                        *created = c;
+                        *cpu100ns = cpu;
+                        true
+                    }
+                    None => false,
+                }
+            }
         };
         close_handle(x);
         let _ = h;
@@ -115,6 +190,9 @@ impl IGameProbe for WinGameProbe {
 
     fn session_of(&self, pid: u32) -> u32 {
         let mut s: u32 = 0;
-        if unsafe { ProcessIdToSessionId(pid, &mut s) } != 0 { s } else { u32::MAX }
+        if unsafe { ProcessIdToSessionId(pid, &mut s) } != 0 {
+            return s;
+        }
+        system_process_times(pid).map(|x| x.2).unwrap_or(u32::MAX)
     }
 }

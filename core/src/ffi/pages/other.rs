@@ -1,7 +1,7 @@
 //! MasksPage.cs, ProcessesPage.cs, SettingsPage.cs, UpdatePage.cs (+ UpdateCard), CheckPage.cs, BlackBoxPage.cs,
 //! ChangesPage.cs and AboutPage.cs.
 
-use super::{b, did, hex, i, mask, queued, s, task, worker};
+use super::{b, did, hex, i, mask, s, task, worker};
 use crate::auto::check_stats::{CheckResult, CheckStats};
 use crate::base::app_log::{AppLog, Sev};
 use crate::base::ci::{self, CiSetExt};
@@ -266,7 +266,7 @@ fn toggles() -> Vec<(&'static str, &'static str, &'static str, bool)> {
         ("BurstGuardSoft", L::t("Burst guard: soft mode"), L::t("On: a busy background program only gives way to the game and is never stopped. Off: a hard limit of half a processor, which can pause that program for a moment."), true),
         ("WaitProbe", L::t("Rank the game's threads by how long they wait (wait probe)"), L::t("While Auto handles a game, Windows' trace is switched on for a quarter of a second every 2 seconds: Top-5 then helps the threads that wait for a core, keeps off processors busy with drivers, and the game's memory is held only when it really reads pages back from disk. Only reads."), true),
         // 1.17.1: Dynamic Top-5's other threads.
-        ("AllThreadsIdeal", L::t("Ideal cores for all game threads"), L::t("With Auto, every other thread of the game (DLL threads too) gets a preferred core away from core 0, the Top-5 cores and the cores drivers keep busy, and is moved only for a clear reason. Only a hint: the threads still migrate. Off puts the values back."), true),
+        ("AllThreadsIdeal", L::t("Ideal cores for all game threads"), L::t("With Auto, every other thread of the game (DLL threads too) gets a preferred core away from core 0, the Top-5 cores and the cores drivers keep busy, and is moved only for a clear reason. Only a hint: the threads still migrate. Off puts the values back."), false),
         ("FaceitCs2", L::t("CS2 under FACEIT: tune the game too"), L::t("FACEIT confirmed in writing (25.11.2026) that their anti-cheat allows it: priorities and cores of CS2's threads. Only CS2 and only FACEIT; other anti-cheats stay untouched. Off: under FACEIT only the background is quieted."), true),
         ("BlackBox", L::t("Black box: explain every stutter of the game"), L::t("While Auto handles a game, the last 30 seconds of the system trace stay in memory; a stutter is explained on the Black box page. Only reads, changes nothing."), false),
         ("LiveIrq", L::t("Watch driver latency while a game runs (live DPC/ISR)"), L::t("While the game runs, Windows measures how long each driver works. Drivers that took 1 ms or more go to the log. Nothing is changed."), true),
@@ -930,21 +930,6 @@ pub fn start(name: &str, a: &Value) -> Option<u64> {
         "process_reset" => process_reset(a),
         "autostart_read" => task(|| json!({"exists": Autostart::task_exists()})),
         "autostart_set" => autostart_set(b(a, "value")),
-        "tuner_start" => {
-            let Some(h) = app::hub() else { return Some(0) };
-            queued(move || {
-                let msg = h.tuner_start();
-                did(&msg, Sev::Info);
-                json!({"msg": msg})
-            })
-        }
-        "tuner_stop" => {
-            let Some(h) = app::hub() else { return Some(0) };
-            queued(move || {
-                h.tuner_stop(L::t("stopped by the user"));
-                json!({})
-            })
-        }
         "resync" => resync(),
         "tester_key_save" => tester_key_save(s(a, "key")),
         "about_wmi" => about_wmi(),

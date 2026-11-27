@@ -1,5 +1,5 @@
 // SettingsPage.cs: General (built-in presets, start with Windows, live charts, re-apply period, language), Functions
-// (auto-tune and the toggles), Feature flags, Watchlist, Factory reset. Owner: app pages B.
+// (the toggles), Feature flags, Watchlist, Factory reset. Owner: app pages B.
 // Native only (owner's decision 3, PLAN.md): in the advanced layout the General card ends with the button
 // "Reload hardware and presets" that does what QuickPage.Resync did (the core's "resync" job logs the result).
 #include "pages_b.h"
@@ -146,12 +146,6 @@ private:
 	{
 		ui::BeginCard();
 		ui::Head(L::T("Functions"));
-		ui::Note(L::T("Auto-tune: while you play (about 8 minutes) Toolbox tries the game with and without the interrupt cores and keeps the rule only if it was better every round."));
-		{
-			ui::Row row;
-			if (ui::Btn(L::T("Start auto-tune"), 170)) bridge::TunerStart();
-			if (ui::Btn(L::T("Stop auto-tune"), 170)) bridge::TunerStop();
-		}
 		for (Toggle& t : functions_)
 		{
 			if (ui::CheckRow(("fn_" + t.key).c_str(), t.label, t.hint, t.value)) bridge::SettingToggle(t.key.c_str(), t.value);
