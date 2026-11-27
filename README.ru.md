@@ -2,6 +2,10 @@
 
 [English](README.md) | **Русский**
 
+![Domain OS Toolbox: «Авто» находит игру, расставляет её самые загруженные потоки и показывает время кадров вживую](docs/media/toolbox-ru.gif)
+
+**Сайт:** [6kane1.github.io/DomainOS](https://6kane1.github.io/DomainOS/ru/) · **Гайды:** [фризы в CS2](https://6kane1.github.io/DomainOS/ru/guide-cs2-stutter.html) · [1% low и 0.1% low](https://6kane1.github.io/DomainOS/ru/guide-1-percent-low.html) · [DPC и прерывания](https://6kane1.github.io/DomainOS/ru/guide-dpc-latency.html) · **[Discord](https://discord.gg/wBGsV7WEpm)**
+
 Утилита для Windows, работающая в пользовательском режиме: настраивает, как планировщик
 размещает потоки игры и сколько ресурсов достаётся фоновым программам. Цель — **более ровное
 время кадра**: лучше 1% и 0.1% low и стабильнее подача кадров. Средний FPS программа не повышает.

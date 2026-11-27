@@ -2,6 +2,10 @@
 
 **English** | [Русский](README.ru.md)
 
+![Domain OS Toolbox: Auto finds the game, places its busiest threads and shows frame times live](docs/media/toolbox-en.gif)
+
+**Website:** [6kane1.github.io/DomainOS](https://6kane1.github.io/DomainOS/) · **Guides:** [CS2 stutters](https://6kane1.github.io/DomainOS/guide-cs2-stutter.html) · [1% low and 0.1% low](https://6kane1.github.io/DomainOS/guide-1-percent-low.html) · [DPC latency](https://6kane1.github.io/DomainOS/guide-dpc-latency.html) · **[Discord](https://discord.gg/wBGsV7WEpm)**
+
 A user-mode Windows utility that tunes how the scheduler places a game's threads and how much
 room background programs take. Its goal is **steadier frame times** — better 1% and 0.1% lows
 and a more even frame pacing — not a higher average FPS.
